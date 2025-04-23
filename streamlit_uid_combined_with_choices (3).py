@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -55,10 +56,11 @@ def get_snowflake_engine():
     except Exception as e:
         logger.error(f"Snowflake engine creation failed: {e}")
         if "250001" in str(e):
-            st.error(
+            st.warning(
                 "Snowflake connection failed: User account is temporarily locked. "
-                "Please contact your Snowflake administrator to unlock the account or wait and retry. "
-                "For details, visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
+                "UID matching and survey name loading are disabled. "
+                "Contact your Snowflake administrator to unlock the account or wait and retry. "
+                "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
             )
         raise
 
@@ -93,8 +95,9 @@ def run_snowflake_reference_query(limit=10000, offset=0):
     except Exception as e:
         logger.error(f"Snowflake reference query failed: {e}")
         if "250001" in str(e):
-            st.error(
+            st.warning(
                 "Cannot fetch reference data from Snowflake: User account is locked. "
+                "UID matching and survey name loading are disabled. "
                 "Please resolve the account lockout and retry."
             )
         raise
@@ -112,7 +115,7 @@ def run_snowflake_target_query():
     except Exception as e:
         logger.error(f"Snowflake target query failed: {e}")
         if "250001" in str(e):
-            st.error(
+            st.warning(
                 "Cannot fetch target data from Snowflake: User account is locked. "
                 "Please resolve the account lockout and retry."
             )
@@ -350,12 +353,30 @@ if option == "SurveyMonkey":
                 if st.session_state.df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    # Initialize df_final without UIDs
-                    st.session_state.df_final = st.session_state.df_target.copy()
-                    st.session_state.df_final["Final_UID"] = None
-                    st.session_state.df_final["configured_final_UID"] = None
-                    st.session_state.df_final["Change_UID"] = None
-                    st.session_state.uid_changes = {}
+                    # Attempt UID matching and populate all tabs
+                    try:
+                        with st.spinner("Running UID matching..."):
+                            st.session_state.df_reference = run_snowflake_reference_query()
+                            st.session_state.df_final = run_uid_match(st.session_state.df_reference, st.session_state.df_target)
+                            st.session_state.uid_changes = {}
+                    except Exception as e:
+                        logger.error(f"UID matching failed: {e}")
+                        if "250001" in str(e):
+                            st.warning(
+                                "Snowflake connection failed: User account is temporarily locked. "
+                                "UID matching and survey name loading are disabled, but you can still edit survey questions and use Google Forms. "
+                                "Contact your Snowflake administrator to unlock the account or wait and retry. "
+                                "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
+                            )
+                            st.session_state.df_reference = None
+                            st.session_state.df_final = st.session_state.df_target.copy()
+                            st.session_state.df_final["Final_UID"] = None
+                            st.session_state.df_final["configured_final_UID"] = None
+                            st.session_state.df_final["Change_UID"] = None
+                            st.session_state.uid_changes = {}
+                        else:
+                            st.error(f"UID matching failed: {e}")
+                            raise
                     
                     # Three Tabs
                     tab1, tab2, tab3 = st.tabs(["Survey Questions and Choices", "UID Matching and Configuration", "Configured Survey"])
@@ -400,24 +421,7 @@ if option == "SurveyMonkey":
                         if st.session_state.df_final is not None:
                             st.subheader("UID Matching Results")
                             if st.session_state.df_final["Final_UID"].isna().all():
-                                st.info("UID matching has not been run. Click 'Run UID Matching' to fetch UIDs from Snowflake.")
-                            
-                            # Trigger UID Matching
-                            if st.button("Run UID Matching"):
-                                try:
-                                    with st.spinner("Running UID matching..."):
-                                        st.session_state.df_reference = run_snowflake_reference_query()
-                                        st.session_state.df_final = run_uid_match(st.session_state.df_reference, st.session_state.df_target)
-                                        st.session_state.uid_changes = {}
-                                except Exception as e:
-                                    logger.error(f"UID matching failed: {e}")
-                                    if "250001" in str(e):
-                                        st.error(
-                                            "Snowflake connection failed: User account is locked. "
-                                            "Please contact your Snowflake administrator or wait and retry."
-                                        )
-                                    else:
-                                        st.error(f"UID matching failed: {e}")
+                                st.info("UID matching is disabled due to Snowflake connection issues. Assign UIDs manually or resolve the connection.")
                             
                             show_main_only = st.checkbox("Show only main questions", value=False, key="tab2_main_only")
                             match_filter = st.selectbox(
@@ -447,7 +451,7 @@ if option == "SurveyMonkey":
                             if st.session_state.df_reference is not None:
                                 uid_options += [f"{row['uid']} - {row['heading_0']}" for _, row in st.session_state.df_reference.iterrows()]
                             else:
-                                st.warning("UID options unavailable. Run UID matching to load UIDs from Snowflake.")
+                                st.warning("UID options unavailable due to Snowflake connection issues. Resolve the connection to load UIDs.")
                             
                             result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                             display_df = result_df[result_columns].copy()
@@ -513,22 +517,8 @@ if option == "SurveyMonkey":
                             survey_options = [None]
                             if st.session_state.df_reference is not None:
                                 survey_options += st.session_state.df_reference["SURVEY_NAME"].dropna().unique().tolist()
-                            
-                            # Trigger Survey Names Load
-                            if st.button("Load Survey Names"):
-                                try:
-                                    with st.spinner("Fetching survey names from Snowflake..."):
-                                        st.session_state.df_reference = run_snowflake_reference_query()
-                                        survey_options = [None] + st.session_state.df_reference["SURVEY_NAME"].dropna().unique().tolist()
-                                except Exception as e:
-                                    logger.error(f"Failed to load survey names: {e}")
-                                    if "250001" in str(e):
-                                        st.error(
-                                            "Snowflake connection failed: User account is locked. "
-                                            "Please contact your Snowflake administrator or wait and retry."
-                                        )
-                                    else:
-                                        st.error(f"Failed to load survey names: {e}")
+                            else:
+                                st.warning("Survey names unavailable due to Snowflake connection issues. Resolve the connection to load survey names.")
                             
                             customize_edited_df = st.data_editor(
                                 customize_df,
@@ -562,7 +552,7 @@ if option == "SurveyMonkey":
                                     if st.session_state.df_reference is not None:
                                         question_options += st.session_state.df_reference[st.session_state.df_reference["SURVEY_NAME"] == row["Survey Name"]]["heading_0"].tolist()
                                     else:
-                                        st.warning("Questions unavailable. Load survey names to populate options.")
+                                        st.warning("Questions unavailable due to Snowflake connection issues. Resolve the connection to load questions.")
                                     customize_edited_df.at[idx, "Pre-existing Question"] = st.session_state.get(f"question_{idx}", None)
                                     st.session_state[f"question_{idx}"] = st.selectbox(
                                         "Pre-existing Question",
