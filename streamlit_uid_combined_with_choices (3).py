@@ -58,7 +58,6 @@ def get_snowflake_engine():
             st.warning(
                 "Snowflake connection failed: User account is locked. "
                 "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                "Contact your Snowflake admin or wait 15–30 minutes. "
                 "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
             )
         raise
@@ -332,7 +331,7 @@ if "df_final" not in st.session_state:
 if "uid_changes" not in st.session_state:
     st.session_state.uid_changes = {}
 if "custom_questions" not in st.session_state:
-    st.session_state.custom_questions = pd.DataFrame(columns=["Customized Question", "Original Question", "UID"])
+    st.session_state.custom_questions = pd.DataFrame(columns=["Customized Question", "Original Question", "Final_UID"])
 if "df_reference" not in st.session_state:
     st.session_state.df_reference = None
 
@@ -508,23 +507,21 @@ if option == "SurveyMonkey":
                                 "Customized Question": [""]
                             })
                             question_options = [None]
-                            if st.session_state.df_reference is not None:
-                                question_options += st.session_state.df_reference["heading_0"].tolist()
-                            else:
-                                st.warning("Pre-existing questions unavailable due to Snowflake issues. Fix connection to load questions.")
+                            if st.session_state.df_target is not None:
+                                question_options += st.session_state.df_target[st.session_state.df_target["is_choice"] == False]["heading_0"].tolist()
                             
                             customize_edited_df = st.data_editor(
                                 customize_df,
                                 column_config={
                                     "Pre-existing Question": st.column_config.SelectboxColumn(
                                         "Pre-existing Question",
-                                        help="Select a question to customize",
+                                        help="Select a question from the current SurveyMonkey survey",
                                         options=question_options,
                                         default=None
                                     ),
                                     "Customized Question": st.column_config.TextColumn(
                                         "Customized Question",
-                                        help="Edit question text",
+                                        help="Enter customized question text",
                                         default=""
                                     )
                                 },
@@ -538,13 +535,14 @@ if option == "SurveyMonkey":
                                     original_question = row["Pre-existing Question"]
                                     custom_question = row["Customized Question"]
                                     uid = None
-                                    if st.session_state.df_reference is not None:
-                                        uid = st.session_state.df_reference[st.session_state.df_reference["heading_0"] == original_question]["uid"].iloc[0] if original_question in st.session_state.df_reference["heading_0"].values else None
-                                    if custom_question and uid:
+                                    if st.session_state.df_final is not None:
+                                        uid_row = st.session_state.df_final[st.session_state.df_final["heading_0"] == original_question]
+                                        uid = uid_row["Final_UID"].iloc[0] if not uid_row.empty else None
+                                    if custom_question:
                                         new_row = pd.DataFrame({
                                             "Customized Question": [custom_question],
                                             "Original Question": [original_question],
-                                            "UID": [uid]
+                                            "Final_UID": [uid]
                                         })
                                         st.session_state.custom_questions = pd.concat([st.session_state.custom_questions, new_row], ignore_index=True)
                             
