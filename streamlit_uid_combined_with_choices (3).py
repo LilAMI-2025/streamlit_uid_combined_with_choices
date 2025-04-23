@@ -49,7 +49,6 @@ def get_snowflake_engine():
             f"snowflake://{sf.user}:{sf.password}@{sf.account}/{sf.database}/{sf.schema}"
             f"?warehouse={sf.warehouse}&role={sf.role}"
         )
-        # Test connection
         with engine.connect() as conn:
             conn.execute(text("SELECT CURRENT_VERSION()"))
         return engine
@@ -326,6 +325,8 @@ if "uid_changes" not in st.session_state:
     st.session_state.uid_changes = {}
 if "custom_questions" not in st.session_state:
     st.session_state.custom_questions = pd.DataFrame(columns=["Customized Question", "Original Question", "UID", "Survey Name"])
+if "df_reference" not in st.session_state:
+    st.session_state.df_reference = None
 
 if option == "SurveyMonkey":
     try:
@@ -349,24 +350,12 @@ if option == "SurveyMonkey":
                 if st.session_state.df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    # Attempt Snowflake connection for UID matching
-                    try:
-                        with st.spinner("Running UID matching..."):
-                            df_reference = run_snowflake_reference_query()
-                            st.session_state.df_final = run_uid_match(df_reference, st.session_state.df_target)
-                            st.session_state.uid_changes = {}
-                    except Exception as e:
-                        if "250001" in str(e):
-                            st.warning(
-                                "Snowflake connection failed due to account lockout. "
-                                "You can still view and edit survey questions, but UID matching is unavailable until the account is unlocked."
-                            )
-                            st.session_state.df_final = st.session_state.df_target.copy()
-                            st.session_state.df_final["Final_UID"] = None
-                            st.session_state.df_final["configured_final_UID"] = None
-                            st.session_state.df_final["Change_UID"] = None
-                        else:
-                            raise
+                    # Initialize df_final without UIDs
+                    st.session_state.df_final = st.session_state.df_target.copy()
+                    st.session_state.df_final["Final_UID"] = None
+                    st.session_state.df_final["configured_final_UID"] = None
+                    st.session_state.df_final["Change_UID"] = None
+                    st.session_state.uid_changes = {}
                     
                     # Three Tabs
                     tab1, tab2, tab3 = st.tabs(["Survey Questions and Choices", "UID Matching and Configuration", "Configured Survey"])
@@ -411,7 +400,25 @@ if option == "SurveyMonkey":
                         if st.session_state.df_final is not None:
                             st.subheader("UID Matching Results")
                             if st.session_state.df_final["Final_UID"].isna().all():
-                                st.info("UID matching is disabled due to Snowflake connection issues. Assign UIDs manually or resolve the connection.")
+                                st.info("UID matching has not been run. Click 'Run UID Matching' to fetch UIDs from Snowflake.")
+                            
+                            # Trigger UID Matching
+                            if st.button("Run UID Matching"):
+                                try:
+                                    with st.spinner("Running UID matching..."):
+                                        st.session_state.df_reference = run_snowflake_reference_query()
+                                        st.session_state.df_final = run_uid_match(st.session_state.df_reference, st.session_state.df_target)
+                                        st.session_state.uid_changes = {}
+                                except Exception as e:
+                                    logger.error(f"UID matching failed: {e}")
+                                    if "250001" in str(e):
+                                        st.error(
+                                            "Snowflake connection failed: User account is locked. "
+                                            "Please contact your Snowflake administrator or wait and retry."
+                                        )
+                                    else:
+                                        st.error(f"UID matching failed: {e}")
+                            
                             show_main_only = st.checkbox("Show only main questions", value=False, key="tab2_main_only")
                             match_filter = st.selectbox(
                                 "Filter by Match Status",
@@ -436,12 +443,11 @@ if option == "SurveyMonkey":
                             result_df = result_df[result_df["is_choice"] == False] if show_main_only else result_df
                             
                             # Prepare UID dropdown options
-                            try:
-                                df_reference = run_snowflake_reference_query()
-                                uid_options = [None] + [f"{row['uid']} - {row['heading_0']}" for _, row in df_reference.iterrows()]
-                            except Exception:
-                                uid_options = [None]
-                                st.warning("Cannot load UID options due to Snowflake connection issues.")
+                            uid_options = [None]
+                            if st.session_state.df_reference is not None:
+                                uid_options += [f"{row['uid']} - {row['heading_0']}" for _, row in st.session_state.df_reference.iterrows()]
+                            else:
+                                st.warning("UID options unavailable. Run UID matching to load UIDs from Snowflake.")
                             
                             result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                             display_df = result_df[result_columns].copy()
@@ -504,12 +510,25 @@ if option == "SurveyMonkey":
                                 "Pre-existing Question": [None],
                                 "Customized Question": [""]
                             })
-                            try:
-                                df_reference = run_snowflake_reference_query()
-                                survey_options = [None] + df_reference["SURVEY_NAME"].dropna().unique().tolist()
-                            except Exception:
-                                survey_options = [None]
-                                st.warning("Cannot load survey names due to Snowflake connection issues.")
+                            survey_options = [None]
+                            if st.session_state.df_reference is not None:
+                                survey_options += st.session_state.df_reference["SURVEY_NAME"].dropna().unique().tolist()
+                            
+                            # Trigger Survey Names Load
+                            if st.button("Load Survey Names"):
+                                try:
+                                    with st.spinner("Fetching survey names from Snowflake..."):
+                                        st.session_state.df_reference = run_snowflake_reference_query()
+                                        survey_options = [None] + st.session_state.df_reference["SURVEY_NAME"].dropna().unique().tolist()
+                                except Exception as e:
+                                    logger.error(f"Failed to load survey names: {e}")
+                                    if "250001" in str(e):
+                                        st.error(
+                                            "Snowflake connection failed: User account is locked. "
+                                            "Please contact your Snowflake administrator or wait and retry."
+                                        )
+                                    else:
+                                        st.error(f"Failed to load survey names: {e}")
                             
                             customize_edited_df = st.data_editor(
                                 customize_df,
@@ -539,12 +558,11 @@ if option == "SurveyMonkey":
                             # Dynamically update Pre-existing Question options
                             for idx, row in customize_edited_df.iterrows():
                                 if row["Survey Name"]:
-                                    try:
-                                        df_reference = run_snowflake_reference_query()
-                                        question_options = [None] + df_reference[df_reference["SURVEY_NAME"] == row["Survey Name"]]["heading_0"].tolist()
-                                    except Exception:
-                                        question_options = [None]
-                                        st.warning("Cannot load questions for selected survey due to Snowflake connection issues.")
+                                    question_options = [None]
+                                    if st.session_state.df_reference is not None:
+                                        question_options += st.session_state.df_reference[st.session_state.df_reference["SURVEY_NAME"] == row["Survey Name"]]["heading_0"].tolist()
+                                    else:
+                                        st.warning("Questions unavailable. Load survey names to populate options.")
                                     customize_edited_df.at[idx, "Pre-existing Question"] = st.session_state.get(f"question_{idx}", None)
                                     st.session_state[f"question_{idx}"] = st.selectbox(
                                         "Pre-existing Question",
@@ -559,12 +577,9 @@ if option == "SurveyMonkey":
                                     original_question = row["Pre-existing Question"]
                                     custom_question = row["Customized Question"]
                                     survey_name = row["Survey Name"]
-                                    try:
-                                        df_reference = run_snowflake_reference_query()
-                                        uid = df_reference[df_reference["heading_0"] == original_question]["uid"].iloc[0] if original_question in df_reference["heading_0"].values else None
-                                    except Exception:
-                                        uid = None
-                                        st.warning("Cannot assign UID for customized question due to Snowflake connection issues.")
+                                    uid = None
+                                    if st.session_state.df_reference is not None:
+                                        uid = st.session_state.df_reference[st.session_state.df_reference["heading_0"] == original_question]["uid"].iloc[0] if original_question in st.session_state.df_reference["heading_0"].values else None
                                     if custom_question and uid:
                                         new_row = pd.DataFrame({
                                             "Customized Question": [custom_question],
