@@ -77,6 +77,30 @@ def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
         text = text.replace(phrase, replacement)
     return ' '.join(w for w in text.split() if w not in ENGLISH_STOP_WORDS)
 
+# Calculate Matched Questions Percentage
+def calculate_matched_percentage(df_final):
+    if df_final is None or df_final.empty:
+        return 0.0
+    
+    # Filter for main questions
+    df_main = df_final[df_final["is_choice"] == False].copy()
+    
+    # Exclusion criteria
+    privacy_filter = ~df_main["heading_0"].str.contains("Our Privacy Policy", case=False, na=False)
+    html_pattern = r"<div.*text-align:\s*center.*<span.*font-size:\s*12pt.*<em>If you have any questions, please contact your AMI Learner Success Manager.*</em>.*</span>.*</div>"
+    html_filter = ~df_main["heading_0"].str.contains(html_pattern, case=False, na=False, regex=True)
+    
+    # Apply filters
+    eligible_questions = df_main[privacy_filter & html_filter]
+    
+    if eligible_questions.empty:
+        return 0.0
+    
+    # Calculate percentage
+    matched_questions = eligible_questions[eligible_questions["Final_UID"].notna()]
+    percentage = (len(matched_questions) / len(eligible_questions)) * 100
+    return round(percentage, 2)
+
 # Snowflake Queries
 def run_snowflake_reference_query(limit=10000, offset=0):
     query = """
@@ -422,6 +446,10 @@ if option == "SurveyMonkey":
                     # Tab 2: UID Matching and Configuration
                     with tab2:
                         if st.session_state.df_final is not None:
+                            # Display matched percentage
+                            matched_percentage = calculate_matched_percentage(st.session_state.df_final)
+                            st.metric("Matched Questions", f"{matched_percentage}%")
+                            
                             st.subheader("UID Matching for Questions/Choices")
                             if st.session_state.df_final["Final_UID"].isna().all():
                                 st.info("UID matching disabled due to Snowflake issues. Assign UIDs manually or fix the connection.")
@@ -554,6 +582,10 @@ if option == "SurveyMonkey":
                     # Tab 3: Configured Survey
                     with tab3:
                         if st.session_state.df_final is not None:
+                            # Display matched percentage
+                            matched_percentage = calculate_matched_percentage(st.session_state.df_final)
+                            st.metric("Matched Questions", f"{matched_percentage}%")
+                            
                             st.subheader("Configured Survey")
                             config_columns = [
                                 "heading_0", "position", "is_choice", "parent_question", 
