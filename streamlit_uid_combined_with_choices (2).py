@@ -5,7 +5,7 @@ import re
 import json
 import logging
 from uuid import uuid4
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
@@ -78,7 +78,9 @@ def run_snowflake_reference_query(limit=10000, offset=0):
         LIMIT :limit OFFSET :offset
     """
     try:
-        return pd.read_sql(query, get_snowflake_engine(), params={"limit": limit, "offset": offset})
+        with get_snowflake_engine().connect() as conn:
+            result = pd.read_sql(text(query), conn, params={"limit": limit, "offset": offset})
+        return result
     except Exception as e:
         logger.error(f"Snowflake reference query failed: {e}")
         raise
@@ -90,7 +92,9 @@ def run_snowflake_target_query():
         WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
     """
     try:
-        return pd.read_sql(query, get_snowflake_engine())
+        with get_snowflake_engine().connect() as conn:
+            result = pd.read_sql(text(query), conn)
+        return result
     except Exception as e:
         logger.error(f"Snowflake target query failed: {e}")
         raise
@@ -258,13 +262,13 @@ if "snowflake" not in st.secrets or "surveymonkey" not in st.secrets:
 
 # Synonym Map Input
 st.subheader("Synonym Mapping")
-synonym_input = st.text_area("Edit Synonym Map (JSON)", value=str(DEFAULT_SYNONYM_MAP), height=100)
+synonym_input = st.text_area("Edit Synonym Map (JSON)", value=json.dumps(DEFAULT_SYNONYM_MAP, indent=2), height=100)
 try:
-    synonym_map = json.loads(synonym_input) if synonym_input else DEFAULT_SYNONYM_MAP
+    synonym_map = json.loads(synonym_input) if synonym_input.strip() else DEFAULT_SYNONYM_MAP
     if not isinstance(synonym_map, dict):
         raise ValueError("Synonym map must be a dictionary.")
 except (json.JSONDecodeError, ValueError) as e:
-    st.error(f"Invalid synonym map format: {e}")
+    st.error(f"Invalid synonym map format: {e}. Ensure keys and values are enclosed in double quotes.")
     synonym_map = DEFAULT_SYNONYM_MAP
 
 # Data Source Selection
@@ -286,6 +290,7 @@ if option == "SurveyMonkey":
         else:
             choices = {s["title"]: s["id"] for s in surveys}
             selected_survey = st.selectbox("Choose Survey", list(choices.keys()))
+            df_target = None
             if selected_survey:
                 with st.spinner("Fetching survey details..."):
                     survey_json = get_survey_details(choices[selected_survey], token)
@@ -294,23 +299,26 @@ if option == "SurveyMonkey":
                 if df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    df_reference = run_snowflake_reference_query()
-                    df_final = run_uid_match(df_reference, df_target, synonym_map)
-                    
-                    # Filter Results
-                    confidence_filter = st.multiselect(
-                        "Filter by Match Type",
-                        ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
-                        default=["✅ High", "⚠️ Low", "🧠 Semantic"]
-                    )
-                    filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
-                    
-                    st.dataframe(filtered_df)
-                    st.download_button(
-                        "📥 Download UID Matches",
-                        filtered_df.to_csv(index=False),
-                        f"uid_matches_{uuid4()}.csv"
-                    )
+                    st.write("Survey questions retrieved successfully. Click below to match UIDs.")
+                    if st.button("Run UID Matching"):
+                        with st.spinner("Running UID matching..."):
+                            df_reference = run_snowflake_reference_query()
+                            df_final = run_uid_match(df_reference, df_target, synonym_map)
+                            
+                            # Filter Results
+                            confidence_filter = st.multiselect(
+                                "Filter by Match Type",
+                                ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
+                                default=["✅ High", "⚠️ Low", "🧠 Semantic"]
+                            )
+                            filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
+                            
+                            st.dataframe(filtered_df)
+                            st.download_button(
+                                "📥 Download UID Matches",
+                                filtered_df.to_csv(index=False),
+                                f"uid_matches_{uuid4()}.csv"
+                            )
     except Exception as e:
         logger.error(f"SurveyMonkey processing failed: {e}")
         st.error(f"Error: {e}")
