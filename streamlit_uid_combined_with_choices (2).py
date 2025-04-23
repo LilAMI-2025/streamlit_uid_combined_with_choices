@@ -174,7 +174,7 @@ def extract_questions(survey_json):
                     "position": global_position,
                     "is_choice": False,
                     "parent_question": None,
-                    "question_id": q_id,
+                    "question_uid": q_id,
                     "schema_type": schema_type,
                     "mandatory": False,
                     "mandatory_editable": True  # Main questions can edit mandatory
@@ -189,7 +189,7 @@ def extract_questions(survey_json):
                             "position": global_position,
                             "is_choice": True,
                             "parent_question": q_text,
-                            "question_id": q_id,
+                            "question_uid": q_id,
                             "schema_type": schema_type,
                             "mandatory": False,
                             "mandatory_editable": False  # Choices cannot edit mandatory
@@ -199,7 +199,7 @@ def extract_questions(survey_json):
 # UID Matching
 def compute_tfidf_matches(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP):
     df_reference = df_reference[df_reference["heading_0"].notna()].reset_index(drop=True)
-    df_target = df_target[df_reference["heading_0"].notna()].reset_index(drop=True)
+    df_target = df_target[df_target["heading_0"].notna()].reset_index(drop=True)
     df_reference["norm_text"] = df_reference["heading_0"].apply(enhanced_normalize)
     df_target["norm_text"] = df_target["heading_0"].apply(enhanced_normalize)
 
@@ -303,7 +303,7 @@ def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batc
     return pd.concat(df_results, ignore_index=True)
 
 # Sidebar
-st.sidebar.title("SurveyMonkey Token")
+st.sidebar.title("SurveyMonkey Actions")
 token = st.secrets.get("surveymonkey", {}).get("token", None)
 if st.sidebar.button("Test SurveyMonkey Token"):
     with st.sidebar:
@@ -337,6 +337,7 @@ if option == "SurveyMonkey":
             choices = {s["title"]: s["id"] for s in surveys}
             selected_survey = st.selectbox("Choose Survey", list(choices.keys()))
             df_target = None
+            df_reference = None
             if selected_survey:
                 with st.spinner("Fetching survey details..."):
                     survey_json = get_survey_details(choices[selected_survey], token)
@@ -345,7 +346,7 @@ if option == "SurveyMonkey":
                 if df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    st.write("Survey questions and choices retrieved successfully. Edit mandatory status and click below to match UIDs.")
+                    st.write("Survey questions and choices retrieved successfully. Edit mandatory status and run UID matching from the sidebar.")
                     # Filter for main questions
                     show_main_only = st.checkbox("Show only main questions", value=False)
                     display_df = df_target[df_target["is_choice"] == False] if show_main_only else df_target
@@ -370,9 +371,9 @@ if option == "SurveyMonkey":
                             "is_choice": st.column_config.CheckboxColumn("Is Choice"),
                             "parent_question": st.column_config.TextColumn("Parent Question"),
                             "schema_type": st.column_config.TextColumn("Schema Type"),
-                            "question_id": st.column_config.TextColumn("Question ID")
+                            "question_uid": st.column_config.TextColumn("Question UID")
                         },
-                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_id", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
+                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_uid", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
                         hide_index=True
                     )
                     
@@ -382,29 +383,81 @@ if option == "SurveyMonkey":
                         if not editable_rows.empty:
                             df_target.loc[df_target["mandatory_editable"], "mandatory"] = edited_df[edited_df["mandatory_editable"]]["mandatory"]
                     
-                    if st.button("Run UID Matching"):
+                    # Run UID Matching from Sidebar
+                    if st.sidebar.button("Run UID Matching"):
                         with st.spinner("Running UID matching..."):
                             df_reference = run_snowflake_reference_query()
                             df_final = run_uid_match(df_reference, df_target)
                             
-                            # Apply filter to results
-                            display_final = df_final[df_final["is_choice"] == False] if show_main_only else df_final
+                            # Prepare UID dropdown options
+                            uid_options = [None] + [f"{row['uid']} - {row['heading_0']}" for _, row in df_reference.iterrows()]
+                            df_final["Select_UID"] = df_final["Final_UID"].apply(lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None)
                             
-                            # Filter Results
-                            confidence_filter = st.multiselect(
-                                "Filter by Match Type",
-                                ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
-                                default=["✅ High", "⚠️ Low", "🧠 Semantic"]
-                            )
-                            filtered_df = display_final[display_final["Final_Match_Type"].isin(confidence_filter)]
-                            
+                            # UID Matching Results
                             st.subheader("UID Matching Results")
-                            st.dataframe(filtered_df)
-                            st.download_button(
-                                "📥 Download UID Matches",
-                                filtered_df.to_csv(index=False),
-                                f"uid_matches_{uuid4()}.csv"
+                            result_columns = ["position", "is_choice", "parent_question", "Final_UID", "question_uid", "schema_type", "norm_text", "Select_UID"]
+                            result_df = df_final[result_columns].copy()
+                            result_df = result_df.rename(columns={"Final_UID": "final_UID"})  # Match case
+                            
+                            # Apply filter for main questions
+                            result_df = result_df[result_df["is_choice"] == False] if show_main_only else result_df
+                            
+                            # Interactive UID selection
+                            edited_result_df = st.data_editor(
+                                result_df,
+                                column_config={
+                                    "position": st.column_config.NumberColumn("Position"),
+                                    "is_choice": st.column_config.CheckboxColumn("Is Choice"),
+                                    "parent_question": st.column_config.TextColumn("Parent Question"),
+                                    "final_UID": st.column_config.TextColumn("Final UID"),
+                                    "question_uid": st.column_config.TextColumn("Question UID"),
+                                    "schema_type": st.column_config.TextColumn("Schema Type"),
+                                    "norm_text": st.column_config.TextColumn("Normalized Text"),
+                                    "Select_UID": st.column_config.SelectboxColumn(
+                                        "Select UID",
+                                        help="Choose an existing UID or assign a new one",
+                                        options=uid_options + ["Assign New UID"],
+                                        default=None
+                                    )
+                                },
+                                disabled=["position", "is_choice", "parent_question", "final_UID", "question_uid", "schema_type", "norm_text"],
+                                hide_index=True
                             )
+                            
+                            # Update Final_UID based on user selection
+                            df_final["Final_UID"] = edited_result_df["Select_UID"].apply(
+                                lambda x: x.split(" - ")[0] if x and x != "Assign New UID" and " - " in x else None
+                            )
+                            
+                            # Show Google Form for new UID if selected
+                            if "Assign New UID" in edited_result_df["Select_UID"].values:
+                                st.write(
+                                    "To assign a new UID, submit a request via Google Form with the following fields: "
+                                    "Question Text, Proposed UID, Program."
+                                )
+                                st.markdown(
+                                    "[Placeholder Google Form for New UID](https://forms.gle/your_form_link) "
+                                    "(Replace with your actual form link after creation)"
+                                )
+                                st.write(
+                                    "To create a form: Go to [Google Forms](https://forms.google.com), "
+                                    "add fields for Question Text, Proposed UID, and Program, and share the link. "
+                                    "Update this app with the link later."
+                                )
+                            
+                            # Configured Survey
+                            st.subheader("Configured Survey")
+                            config_columns = [
+                                "heading_0", "position", "is_choice", "parent_question", 
+                                "schema_type", "mandatory", "mandatory_editable", "configured_final_UID"
+                            ]
+                            config_df = df_final[config_columns].copy()
+                            config_df["configured_final_UID"] = df_final["Final_UID"]
+                            
+                            # Apply filter for main questions
+                            config_df = config_df[config_df["is_choice"] == False] if show_main_only else config_df
+                            
+                            st.dataframe(config_df)
                     
                     # Add New Question Option
                     st.subheader("Add New Question")
