@@ -141,10 +141,9 @@ st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 option = st.radio("Choose Source", ["SurveyMonkey", "Snowflake"], horizontal=True)
 
 if option == "SurveyMonkey":
-    token = st.text_input("🔑 Enter SurveyMonkey Token", type="password")
+    token = st.secrets["surveymonkey"]["token"]
     if token:
         try:
-            df_mapped = run_snowflake_query()
             surveys = get_surveys(token)
             choices = {s['title']: s['id'] for s in surveys}
             selected = st.selectbox("Choose survey", list(choices.keys()))
@@ -152,6 +151,7 @@ if option == "SurveyMonkey":
                 survey_json = get_survey_details(choices[selected], token)
                 questions = extract_questions(survey_json)
                 df_unmapped = pd.DataFrame({"heading_0": questions})
+                df_mapped = pd.DataFrame(columns=["heading_0", "uid"])  # dummy fallback if Snowflake not available
                 df_final = run_uid_match(df_mapped, df_unmapped)
                 st.dataframe(df_final)
                 st.download_button("📥 Download UID Matches", df_final.to_csv(index=False), "uid_matches.csv")
