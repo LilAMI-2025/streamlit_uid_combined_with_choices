@@ -145,12 +145,29 @@ def extract_questions(survey_json):
     for page in survey_json.get("pages", []):
         for question in page.get("questions", []):
             q_text = question.get("headings", [{}])[0].get("heading", "")
+            position = question.get("position", None)
+            q_id = question.get("id", None)
             if q_text:
-                questions.append(q_text)
-                for choice in question.get("answers", {}).get("choices", []):
+                # Add the question
+                questions.append({
+                    "heading_0": q_text,
+                    "position": position,
+                    "is_choice": False,
+                    "parent_question": None,
+                    "question_id": q_id
+                })
+                # Add choices for applicable question types
+                choices = question.get("answers", {}).get("choices", [])
+                for choice in choices:
                     choice_text = choice.get("text", "")
                     if choice_text:
-                        questions.append(f"{q_text} - {choice_text}")
+                        questions.append({
+                            "heading_0": f"{q_text} - {choice_text}",
+                            "position": position,
+                            "is_choice": True,
+                            "parent_question": q_text,
+                            "question_id": q_id
+                        })
     return questions
 
 # UID Matching
@@ -217,6 +234,13 @@ def finalize_matches(df_target):
     df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
     df_target["Final_Question"] = df_target["Matched_Question"]
     df_target["Final_Match_Type"] = df_target.apply(assign_match_type, axis=1)
+    
+    # Propagate UID to choices
+    df_target["Final_UID"] = df_target.apply(
+        lambda row: df_target[df_target["heading_0"] == row["parent_question"]]["Final_UID"].iloc[0]
+        if row["is_choice"] and pd.notnull(row["parent_question"]) else row["Final_UID"],
+        axis=1
+    )
     return df_target
 
 def detect_uid_conflicts(df_target):
@@ -295,11 +319,15 @@ if option == "SurveyMonkey":
                 with st.spinner("Fetching survey details..."):
                     survey_json = get_survey_details(choices[selected_survey], token)
                     questions = extract_questions(survey_json)
-                    df_target = pd.DataFrame({"heading_0": questions})
+                    df_target = pd.DataFrame(questions)
                 if df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    st.write("Survey questions retrieved successfully. Click below to match UIDs.")
+                    st.write("Survey questions and choices retrieved successfully. Click below to match UIDs.")
+                    # Display questions and choices
+                    st.subheader("Survey Questions and Choices")
+                    st.dataframe(df_target[["heading_0", "position", "is_choice", "parent_question"]])
+                    
                     if st.button("Run UID Matching"):
                         with st.spinner("Running UID matching..."):
                             df_reference = run_snowflake_reference_query()
@@ -313,12 +341,53 @@ if option == "SurveyMonkey":
                             )
                             filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
                             
+                            st.subheader("UID Matching Results")
                             st.dataframe(filtered_df)
                             st.download_button(
                                 "📥 Download UID Matches",
                                 filtered_df.to_csv(index=False),
                                 f"uid_matches_{uuid4()}.csv"
                             )
+                    
+                    # Add New Question Option
+                    st.subheader("Add New Question")
+                    add_question_method = st.radio(
+                        "Choose method to add new question",
+                        ["Google Form", "Snowflake Query"],
+                        index=0
+                    )
+                    if add_question_method == "Google Form":
+                        st.write(
+                            "Submit a new question request via Google Form. "
+                            "Create a form with fields: Question Text, Question Type, Choices (optional), Program."
+                        )
+                        st.markdown(
+                            "[Placeholder Google Form](https://forms.gle/your_form_link) "
+                            "(Replace with your actual form link after creation)"
+                        )
+                        st.write(
+                            "To create a form: Go to [Google Forms](https://forms.google.com), "
+                            "add fields, and share the link. Update this app with the link later."
+                        )
+                    else:  # Snowflake Query
+                        st.write("Use the following SQL query to add a new question to the question bank:")
+                        new_question_sql = """
+INSERT INTO AMI_DBT.DBT_SURVEY_MONKEY.QUESTION_BANK
+(HEADING_0, UID, POSITION, CREATED_AT)
+VALUES
+(:question_text, :uid, :position, CURRENT_TIMESTAMP);
+"""
+                        st.code(new_question_sql, language="sql")
+                        st.write(
+                            "Parameters:\n"
+                            "- question_text: The question text (e.g., 'What is your favorite color?')\n"
+                            "- uid: A unique identifier (e.g., generate via UUID)\n"
+                            "- position: The desired position (e.g., 1, 2, 3)"
+                        )
+                        st.write(
+                            "Execute this query in Snowflake after replacing parameters. "
+                            "Ensure the QUESTION_BANK table exists with appropriate columns."
+                        )
     except Exception as e:
         logger.error(f"SurveyMonkey processing failed: {e}")
         st.error(f"Error: {e}")
