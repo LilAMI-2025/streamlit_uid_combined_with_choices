@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 import requests
@@ -97,6 +96,24 @@ def run_snowflake_target_query():
         raise
 
 # SurveyMonkey API
+def test_surveymonkey_token(token):
+    url = "https://api.surveymonkey.com/v3/surveys"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        logger.info("Token is valid! Retrieved surveys:")
+        for survey in data.get("data", []):
+            logger.info(f"- {survey['title']} (ID: {survey['id']})")
+        return True
+    except requests.HTTPError as e:
+        logger.error(f"HTTP Error: {e.response.status_code} - {e.response.text}")
+        return False
+    except requests.RequestException as e:
+        logger.error(f"Request failed: {e}")
+        return False
+
 def get_surveys(token):
     url = "https://api.surveymonkey.com/v3/surveys"
     headers = {"Authorization": f"Bearer {token}"}
@@ -256,6 +273,12 @@ option = st.radio("Choose Data Source", ["SurveyMonkey", "Snowflake"], horizonta
 if option == "SurveyMonkey":
     try:
         token = st.secrets["surveymonkey"]["token"]
+        if st.button("Test SurveyMonkey Token"):
+            with st.spinner("Testing token..."):
+                if test_surveymonkey_token(token):
+                    st.success("Token is valid! Surveys are accessible.")
+                else:
+                    st.error("Token test failed. Check logs or token configuration.")
         with st.spinner("Fetching surveys..."):
             surveys = get_surveys(token)
         if not surveys:
@@ -317,4 +340,3 @@ if option == "Snowflake":
                 filtered_df.to_csv(index=False),
                 f"uid_matches_{uuid4()}.csv"
             )
-```
