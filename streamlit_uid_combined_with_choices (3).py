@@ -80,10 +80,12 @@ def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
 # Calculate Matched Questions Percentage
 def calculate_matched_percentage(df_final):
     if df_final is None or df_final.empty:
+        logger.info("calculate_matched_percentage: df_final is None or empty")
         return 0.0
     
     # Filter for main questions
     df_main = df_final[df_final["is_choice"] == False].copy()
+    logger.info(f"calculate_matched_percentage: Total main questions: {len(df_main)}")
     
     # Exclusion criteria
     privacy_filter = ~df_main["heading_0"].str.contains("Our Privacy Policy", case=False, na=False)
@@ -92,12 +94,15 @@ def calculate_matched_percentage(df_final):
     
     # Apply filters
     eligible_questions = df_main[privacy_filter & html_filter]
+    logger.info(f"calculate_matched_percentage: Eligible questions after exclusions: {len(eligible_questions)}")
     
     if eligible_questions.empty:
+        logger.info("calculate_matched_percentage: No eligible questions after exclusions")
         return 0.0
     
     # Calculate percentage
     matched_questions = eligible_questions[eligible_questions["Final_UID"].notna()]
+    logger.info(f"calculate_matched_percentage: Matched questions: {len(matched_questions)}")
     percentage = (len(matched_questions) / len(eligible_questions)) * 100
     return round(percentage, 2)
 
@@ -405,6 +410,19 @@ if option == "SurveyMonkey":
                             st.error(f"UID matching failed: {e}")
                             raise
                     
+                    # Calculate matched percentage
+                    matched_percentage = calculate_matched_percentage(st.session_state.df_final)
+                    if matched_percentage == 0.0 and st.session_state.df_final is not None:
+                        eligible_count = len(st.session_state.df_final[
+                            (st.session_state.df_final["is_choice"] == False) &
+                            (~st.session_state.df_final["heading_0"].str.contains("Our Privacy Policy", case=False, na=False)) &
+                            (~st.session_state.df_final["heading_0"].str.contains(
+                                r"<div.*text-align:\s*center.*<span.*font-size:\s*12pt.*<em>If you have any questions, please contact your AMI Learner Success Manager.*</em>.*</span>.*</div>",
+                                case=False, na=False, regex=True))
+                        ])
+                        if eligible_count == 0:
+                            st.warning("No eligible questions found (all may be excluded due to 'Our Privacy Policy' or specific HTML format).")
+                    
                     # Three Tabs
                     tab1, tab2, tab3 = st.tabs(["Survey Questions and Choices", "UID Matching and Configuration", "Configured Survey"])
 
@@ -445,11 +463,10 @@ if option == "SurveyMonkey":
 
                     # Tab 2: UID Matching and Configuration
                     with tab2:
+                        # Display matched percentage
+                        st.metric("Matched Questions", f"{matched_percentage}%")
+                        
                         if st.session_state.df_final is not None:
-                            # Display matched percentage
-                            matched_percentage = calculate_matched_percentage(st.session_state.df_final)
-                            st.metric("Matched Questions", f"{matched_percentage}%")
-                            
                             st.subheader("UID Matching for Questions/Choices")
                             if st.session_state.df_final["Final_UID"].isna().all():
                                 st.info("UID matching disabled due to Snowflake issues. Assign UIDs manually or fix the connection.")
@@ -581,11 +598,10 @@ if option == "SurveyMonkey":
 
                     # Tab 3: Configured Survey
                     with tab3:
+                        # Display matched percentage
+                        st.metric("Matched Questions", f"{matched_percentage}%")
+                        
                         if st.session_state.df_final is not None:
-                            # Display matched percentage
-                            matched_percentage = calculate_matched_percentage(st.session_state.df_final)
-                            st.metric("Matched Questions", f"{matched_percentage}%")
-                            
                             st.subheader("Configured Survey")
                             config_columns = [
                                 "heading_0", "position", "is_choice", "parent_question", 
