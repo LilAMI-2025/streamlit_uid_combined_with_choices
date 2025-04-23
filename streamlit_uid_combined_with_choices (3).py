@@ -252,17 +252,16 @@ def assign_match_type(row):
 
 def finalize_matches(df_target):
     df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
-    df_target["configured_final_UID"] = df_target["Final_UID"]  # Initialize configured_final_UID
+    df_target["configured_final_UID"] = df_target["Final_UID"]
     df_target["Final_Question"] = df_target["Matched_Question"]
     df_target["Final_Match_Type"] = df_target.apply(assign_match_type, axis=1)
     
-    # Propagate UID to choices
     df_target["Final_UID"] = df_target.apply(
         lambda row: df_target[df_target["heading_0"] == row["parent_question"]]["Final_UID"].iloc[0]
         if row["is_choice"] and pd.notnull(row["parent_question"]) else row["Final_UID"],
         axis=1
     )
-    df_target["configured_final_UID"] = df_target["Final_UID"]  # Update after propagation
+    df_target["configured_final_UID"] = df_target["Final_UID"]
     return df_target
 
 def detect_uid_conflicts(df_target):
@@ -298,17 +297,6 @@ def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batc
         return pd.DataFrame()
     return pd.concat(df_results, ignore_index=True)
 
-# Sidebar
-st.sidebar.title("SurveyMonkey Actions")
-token = st.secrets.get("surveymonkey", {}).get("token", None)
-if st.sidebar.button("Test SurveyMonkey Token"):
-    with st.sidebar:
-        with st.spinner("Testing token..."):
-            if token and test_surveymonkey_token(token):
-                st.success("Token is valid! Surveys are accessible.")
-            else:
-                st.error("Token test failed. Check logs or token configuration.")
-
 # App UI
 st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 
@@ -327,9 +315,12 @@ if "df_final" not in st.session_state:
     st.session_state.df_final = None
 if "uid_changes" not in st.session_state:
     st.session_state.uid_changes = {}
+if "custom_questions" not in st.session_state:
+    st.session_state.custom_questions = pd.DataFrame(columns=["Customized Question", "Original Question", "UID"])
 
 if option == "SurveyMonkey":
     try:
+        token = st.secrets.get("surveymonkey", {}).get("token", None)
         if not token:
             st.error("SurveyMonkey token is missing in secrets configuration.")
             st.stop()
@@ -339,15 +330,22 @@ if option == "SurveyMonkey":
             st.error("No surveys found or invalid API response.")
         else:
             choices = {s["title"]: s["id"] for s in surveys}
-            selected_survey = st.selectbox("Choose Survey", list(choices.keys()))
+            selected_survey = st.selectbox("Choose Survey", [""] + list(choices.keys()), index=0)
             if selected_survey:
                 with st.spinner("Fetching survey details..."):
                     survey_json = get_survey_details(choices[selected_survey], token)
                     questions = extract_questions(survey_json)
                     st.session_state.df_target = pd.DataFrame(questions)
+                
                 if st.session_state.df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
+                    # Automatically run UID matching
+                    with st.spinner("Running UID matching..."):
+                        df_reference = run_snowflake_reference_query()
+                        st.session_state.df_final = run_uid_match(df_reference, st.session_state.df_target)
+                        st.session_state.uid_changes = {}
+                    
                     # Three Tabs
                     tab1, tab2, tab3 = st.tabs(["Survey Questions and Choices", "UID Matching and Configuration", "Configured Survey"])
 
@@ -388,15 +386,10 @@ if option == "SurveyMonkey":
 
                     # Tab 2: UID Matching and Configuration
                     with tab2:
-                        if st.sidebar.button("Run UID Matching"):
-                            with st.spinner("Running UID matching..."):
-                                df_reference = run_snowflake_reference_query()
-                                st.session_state.df_final = run_uid_match(df_reference, st.session_state.df_target)
-                                st.session_state.uid_changes = {}
-
                         if st.session_state.df_final is not None:
                             st.subheader("UID Matching Results")
                             show_main_only = st.checkbox("Show only main questions", value=False, key="tab2_main_only")
+                            search_query = st.text_input("Search Questions", "")
                             match_filter = st.selectbox(
                                 "Filter by Match Status",
                                 ["All", "Matched", "Not Matched"],
@@ -404,6 +397,8 @@ if option == "SurveyMonkey":
                             )
                             
                             result_df = st.session_state.df_final.copy()
+                            if search_query:
+                                result_df = result_df[result_df["heading_0"].str.contains(search_query, case=False, na=False)]
                             if match_filter == "Matched":
                                 result_df = result_df[result_df["Final_UID"].notna()]
                             elif match_filter == "Not Matched":
@@ -414,15 +409,12 @@ if option == "SurveyMonkey":
                             df_reference = run_snowflake_reference_query()
                             uid_options = [None] + [f"{row['uid']} - {row['heading_0']}" for _, row in df_reference.iterrows()]
                             
-                            # Initialize Change_UID and New_UID columns
                             if "Change_UID" not in result_df.columns:
                                 result_df["Change_UID"] = result_df["Final_UID"].apply(
                                     lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
                                 )
-                            if "New_UID" not in result_df.columns:
-                                result_df["New_UID"] = False
                             
-                            result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID", "New_UID"]
+                            result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                             display_df = result_df[result_columns].copy()
                             display_df = display_df.rename(columns={"heading_0": "Question/Choice", "Final_UID": "final_UID"})
                             
@@ -437,14 +429,9 @@ if option == "SurveyMonkey":
                                     "schema_type": st.column_config.TextColumn("Schema Type"),
                                     "Change_UID": st.column_config.SelectboxColumn(
                                         "Change UID",
-                                        help="Select an existing UID from Snowflake",
+                                        help="Select an existing UID from Snowflake (searchable)",
                                         options=uid_options,
                                         default=None
-                                    ),
-                                    "New_UID": st.column_config.CheckboxColumn(
-                                        "New UID",
-                                        help="Check to request a new UID via Google Form",
-                                        default=False
                                     )
                                 },
                                 disabled=["Question/Choice", "position", "is_choice", "final_UID", "question_uid", "schema_type"],
@@ -458,58 +445,89 @@ if option == "SurveyMonkey":
                                     st.session_state.df_final.at[idx, "Final_UID"] = new_uid
                                     st.session_state.df_final.at[idx, "configured_final_UID"] = new_uid
                                     st.session_state.uid_changes[idx] = new_uid
-                                if row["New_UID"]:
-                                    st.session_state.uid_changes[idx] = "New_UID"
                             
-                            # Show Google Form for New UID
-                            if any(edited_df["New_UID"]):
-                                st.write(
-                                    "To assign a new UID, submit a request via Google Form with the following fields: "
-                                    "Question Text, Proposed UID, Program."
-                                )
-                                st.markdown(
-                                    "[Placeholder Google Form for New UID](https://forms.gle/your_form_link) "
-                                    "(Replace with your actual form link after creation)"
-                                )
-                                st.write(
-                                    "To create a form: Go to [Google Forms](https://forms.google.com), "
-                                    "add fields for Question Text, Proposed UID, and Program, and share the link. "
-                                    "Update this app with the link later."
-                                )
-                            
-                            # Add New Question
-                            st.subheader("Add New Question")
-                            add_question_method = st.radio(
-                                "Choose method to add new question",
-                                ["Google Form", "Snowflake Query"],
-                                index=0
+                            # Create New Questions
+                            st.subheader("Create New Questions")
+                            st.write(
+                                "To add a new question, submit a request via Google Form. "
+                                "Create a form with the following mandatory fields: "
+                                "- Question Text: The question to be added\n"
+                                "- Question Type: Single Choice, Multiple Choice, Open-Ended, or Matrix\n"
+                                "- Choices: List of choices (for Single/Multiple Choice, optional)\n"
+                                "- Program: The associated program (e.g., Capplus, HA)\n"
+                                "- Mandatory: Whether the question is mandatory (Yes/No)"
                             )
-                            if add_question_method == "Google Form":
-                                st.write(
-                                    "Submit a new question request via Google Form. "
-                                    "Create a form with fields: Question Text, Question Type, Choices (optional), Program, Mandatory."
-                                )
-                                st.markdown(
-                                    "[Placeholder Google Form](https://forms.gle/your_form_link) "
-                                    "(Replace with your actual form link after creation)"
-                                )
-                            else:
-                                st.write("Use the following SQL query to add a new question to the question bank:")
-                                new_question_sql = """
-INSERT INTO AMI_DBT.DBT_SURVEY_MONKEY.QUESTION_BANK
-(HEADING_0, UID, POSITION, SCHEMA_TYPE, MANDATORY, CREATED_AT)
-VALUES
-(:question_text, :uid, :position, :schema_type, :mandatory, CURRENT_TIMESTAMP);
-"""
-                                st.code(new_question_sql, language="sql")
-                                st.write(
-                                    "Parameters:\n"
-                                    "- question_text: The question text\n"
-                                    "- uid: A unique identifier\n"
-                                    "- position: The desired position\n"
-                                    "- schema_type: The question type\n"
-                                    "- mandatory: Boolean (TRUE/FALSE)"
-                                )
+                            st.markdown(
+                                "[Placeholder Google Form](https://forms.gle/your_form_link) "
+                                "(Replace with your actual form link after creation)"
+                            )
+                            st.write(
+                                "To create a form: Go to [Google Forms](https://forms.google.com), "
+                                "add the above fields, and share the link. Update this app with the link later."
+                            )
+                            
+                            # Create New UID
+                            st.subheader("Create New UID")
+                            st.write(
+                                "To assign a new UID for a question, submit a request via Google Form. "
+                                "Use the same form as for new questions with the following mandatory fields: "
+                                "- Question Text: The question requiring a new UID\n"
+                                "- Proposed UID: A unique identifier (e.g., QSTN_001)\n"
+                                "- Program: The associated program\n"
+                                "- Question Type: The question type\n"
+                                "- Mandatory: Whether the question is mandatory (Yes/No)"
+                            )
+                            st.markdown(
+                                "[Placeholder Google Form](https://forms.gle/your_form_link) "
+                                "(Replace with your actual form link after creation)"
+                            )
+                            
+                            # Customize Pre-existing Questions
+                            st.subheader("Customize Pre-existing Questions")
+                            customize_df = pd.DataFrame({
+                                "Pre-existing Question": [None],
+                                "Customized Question": [""]
+                            })
+                            df_reference = run_snowflake_reference_query()
+                            question_options = [None] + df_reference["heading_0"].tolist()
+                            
+                            customize_edited_df = st.data_editor(
+                                customize_df,
+                                column_config={
+                                    "Pre-existing Question": st.column_config.SelectboxColumn(
+                                        "Pre-existing Question",
+                                        help="Select a question to customize",
+                                        options=question_options,
+                                        default=None
+                                    ),
+                                    "Customized Question": st.column_config.TextColumn(
+                                        "Customized Question",
+                                        help="Edit the question text",
+                                        default=""
+                                    )
+                                },
+                                hide_index=True,
+                                num_rows="dynamic"
+                            )
+                            
+                            # Update customized questions
+                            for _, row in customize_edited_df.iterrows():
+                                if row["Pre-existing Question"] and row["Customized Question"]:
+                                    original_question = row["Pre-existing Question"]
+                                    custom_question = row["Customized Question"]
+                                    uid = df_reference[df_reference["heading_0"] == original_question]["uid"].iloc[0] if original_question in df_reference["heading_0"].values else None
+                                    if custom_question and uid:
+                                        new_row = pd.DataFrame({
+                                            "Customized Question": [custom_question],
+                                            "Original Question": [original_question],
+                                            "UID": [uid]
+                                        })
+                                        st.session_state.custom_questions = pd.concat([st.session_state.custom_questions, new_row], ignore_index=True)
+                            
+                            # Display Customized Questions
+                            if not st.session_state.custom_questions.empty:
+                                st.subheader("Customized Questions")
+                                st.dataframe(st.session_state.custom_questions)
 
                     # Tab 3: Configured Survey
                     with tab3:
@@ -523,7 +541,7 @@ VALUES
                             config_df = config_df[config_df["is_choice"] == False] if show_main_only else config_df
                             st.dataframe(config_df)
                         else:
-                            st.write("Run UID matching in Tab 2 to view the configured survey.")
+                            st.write("Select a survey to view the configured survey.")
 
     except Exception as e:
         logger.error(f"SurveyMonkey processing failed: {e}")
