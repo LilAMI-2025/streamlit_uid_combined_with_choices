@@ -1,30 +1,18 @@
-```python
+# Combined Streamlit App: SurveyMonkey + Snowflake UID Matching with Choices Support
+
 import streamlit as st
 import pandas as pd
 import requests
 import re
-import json
-import logging
-from uuid import uuid4
 from sqlalchemy import create_engine
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
 
-# Setup
 st.set_page_config(page_title="UID Matcher Combined", layout="wide")
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Constants
-TFIDF_HIGH_CONFIDENCE = 0.60  # Threshold for high-confidence syntactic matches
-TFIDF_LOW_CONFIDENCE = 0.50   # Threshold for low-confidence syntactic matches
-SEMANTIC_THRESHOLD = 0.60     # Threshold for semantic matches
-MODEL_NAME = "all-MiniLM-L6-v2"
-BATCH_SIZE = 1000             # Batch size for processing large datasets
-
-# Synonym Mapping
-DEFAULT_SYNONYM_MAP = {
+# --- UID Matching Logic ---
+synonym_map = {
     "please select": "what is",
     "sector you are from": "your sector",
     "identity type": "id type",
@@ -32,289 +20,151 @@ DEFAULT_SYNONYM_MAP = {
     "are you": "do you",
 }
 
-# Cached Resources
-@st.cache_resource
-def load_sentence_transformer():
-    logger.info(f"Loading SentenceTransformer model: {MODEL_NAME}")
-    try:
-        return SentenceTransformer(MODEL_NAME)
-    except Exception as e:
-        logger.error(f"Failed to load SentenceTransformer: {e}")
-        raise
-
-@st.cache_resource
-def get_snowflake_engine():
-    try:
-        sf = st.secrets["snowflake"]
-        return create_engine(
-            f"snowflake://{sf.user}:{sf.password}@{sf.account}/{sf.database}/{sf.schema}"
-            f"?warehouse={sf.warehouse}&role={sf.role}"
-        )
-    except Exception as e:
-        logger.error(f"Failed to create Snowflake engine: {e}")
-        raise
-
-@st.cache_data
-def get_tfidf_vectors(df_reference):
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2))
-    vectors = vectorizer.fit_transform(df_reference["norm_text"])
-    return vectorizer, vectors
-
-# Normalization
-def enhanced_normalize(text, synonym_map):
-    text = str(text).lower()
-    text = re.sub(r'\(.*?\)', '', text)  # Remove parenthetical content
-    text = re.sub(r'[^a-z0-9 ]', '', text)  # Keep alphanumeric and spaces
+def apply_synonyms(text):
     for phrase, replacement in synonym_map.items():
         text = text.replace(phrase, replacement)
-    return ' '.join(w for w in text.split() if w not in ENGLISH_STOP_WORDS)
+    return text
 
-# Snowflake Queries
-def run_snowflake_reference_query(limit=10000, offset=0):
-    query = """
+def enhanced_normalize(text):
+    text = str(text).lower()
+    text = re.sub(r'\(.*?\)', '', text)
+    text = re.sub(r'[^a-z0-9 ]', '', text)
+    text = apply_synonyms(text)
+    words = text.split()
+    return ' '.join([w for w in words if w not in ENGLISH_STOP_WORDS])
+
+def run_uid_match(df_mapped, df_unmapped):
+    df_mapped = df_mapped[df_mapped["heading_0"].notna()].reset_index(drop=True)
+    df_unmapped = df_unmapped[df_unmapped["heading_0"].notna()].reset_index(drop=True)
+    df_mapped["norm_text"] = df_mapped["heading_0"].apply(enhanced_normalize)
+    df_unmapped["norm_text"] = df_unmapped["heading_0"].apply(enhanced_normalize)
+
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+    vectorizer.fit(df_mapped["norm_text"].tolist() + df_unmapped["norm_text"].tolist())
+    similarity_matrix = cosine_similarity(vectorizer.transform(df_unmapped["norm_text"]), vectorizer.transform(df_mapped["norm_text"]))
+
+    matched_uids, matched_qs, scores, confs = [], [], [], []
+    for i, sim_row in enumerate(similarity_matrix):
+        best_idx = sim_row.argmax()
+        best_score = sim_row[best_idx]
+        if best_score >= 0.60:
+            uid = df_mapped.iloc[best_idx]["uid"]
+            q = df_mapped.iloc[best_idx]["heading_0"]
+            conf = "✅ High"
+        elif best_score >= 0.50:
+            uid = df_mapped.iloc[best_idx]["uid"]
+            q = df_mapped.iloc[best_idx]["heading_0"]
+            conf = "⚠️ Low"
+        else:
+            uid, q, conf = None, None, "❌ No match"
+        matched_uids.append(uid)
+        matched_qs.append(q)
+        scores.append(round(best_score, 4))
+        confs.append(conf)
+
+    df_unmapped["Suggested_UID"] = matched_uids
+    df_unmapped["Matched_Question"] = matched_qs
+    df_unmapped["Similarity"] = scores
+    df_unmapped["Match_Confidence"] = confs
+
+    st.info("Running semantic fallback...")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    emb_u = model.encode(df_unmapped["heading_0"].tolist(), convert_to_tensor=True)
+    emb_m = model.encode(df_mapped["heading_0"].tolist(), convert_to_tensor=True)
+    cosine_scores = util.cos_sim(emb_u, emb_m)
+
+    sem_matches, sem_scores = [], []
+    for i in range(len(df_unmapped)):
+        best_idx = cosine_scores[i].argmax().item()
+        score = cosine_scores[i][best_idx].item()
+        if score >= 0.60:
+            sem_matches.append(df_mapped.iloc[best_idx]["uid"])
+            sem_scores.append(round(score, 4))
+        else:
+            sem_matches.append(None)
+            sem_scores.append(None)
+
+    df_unmapped["Semantic_UID"] = sem_matches
+    df_unmapped["Semantic_Similarity"] = sem_scores
+    df_unmapped["Final_UID"] = df_unmapped["Suggested_UID"].combine_first(df_unmapped["Semantic_UID"])
+    df_unmapped["Final_Question"] = df_unmapped["Matched_Question"]
+    df_unmapped["Final_Match_Type"] = df_unmapped.apply(lambda row: row["Match_Confidence"] if pd.notnull(row["Suggested_UID"]) else ("🧠 Semantic" if pd.notnull(row["Semantic_UID"]) else "❌ No match"), axis=1)
+
+    uid_conflicts = df_unmapped.groupby("Final_UID")["heading_0"].nunique()
+    duplicate_uids = uid_conflicts[uid_conflicts > 1].index
+    df_unmapped["UID_Conflict"] = df_unmapped["Final_UID"].apply(lambda x: "⚠️ Conflict" if x in duplicate_uids else "")
+
+    return df_unmapped
+
+# --- Snowflake Setup ---
+@st.cache_resource
+def get_snowflake_engine():
+    sf = st.secrets["snowflake"]
+    return create_engine(f"snowflake://{sf.user}:{sf.password}@{sf.account}/{sf.database}/{sf.schema}?warehouse={sf.warehouse}&role={sf.role}")
+
+def run_snowflake_query():
+    engine = get_snowflake_engine()
+    df = pd.read_sql("""
         SELECT HEADING_0, MAX(UID) AS UID
         FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
         WHERE UID IS NOT NULL
         GROUP BY HEADING_0
-        LIMIT :limit OFFSET :offset
-    """
-    try:
-        return pd.read_sql(query, get_snowflake_engine(), params={"limit": limit, "offset": offset})
-    except Exception as e:
-        logger.error(f"Snowflake reference query failed: {e}")
-        raise
+    """, engine)
+    return df
 
-def run_snowflake_target_query():
-    query = """
-        SELECT DISTINCT HEADING_0
-        FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
-        WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
-    """
-    try:
-        return pd.read_sql(query, get_snowflake_engine())
-    except Exception as e:
-        logger.error(f"Snowflake target query failed: {e}")
-        raise
-
-# SurveyMonkey API
+# --- SurveyMonkey API ---
 def get_surveys(token):
     url = "https://api.surveymonkey.com/v3/surveys"
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json().get("data", [])
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch surveys: {e}")
-        raise
+    return requests.get(url, headers=headers).json()["data"]
 
 def get_survey_details(survey_id, token):
     url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/details"
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch survey details for ID {survey_id}: {e}")
-        raise
+    return requests.get(url, headers=headers).json()
 
 def extract_questions(survey_json):
     questions = []
     for page in survey_json.get("pages", []):
         for question in page.get("questions", []):
             q_text = question.get("headings", [{}])[0].get("heading", "")
-            if q_text:
-                questions.append(q_text)
-                for choice in question.get("answers", {}).get("choices", []):
-                    choice_text = choice.get("text", "")
-                    if choice_text:
-                        questions.append(f"{q_text} - {choice_text}")
+            questions.append(q_text)
+            for choice in question.get("answers", {}).get("choices", []):
+                choice_text = choice.get("text", "")
+                if choice_text:
+                    questions.append(f"{q_text} - {choice_text}")
     return questions
 
-# UID Matching
-def compute_tfidf_matches(df_reference, df_target, synonym_map):
-    df_reference = df_reference[df_reference["heading_0"].notna()].reset_index(drop=True)
-    df_target = df_target[df_target["heading_0"].notna()].reset_index(drop=True)
-    df_reference["norm_text"] = df_reference["heading_0"].apply(lambda x: enhanced_normalize(x, synonym_map))
-    df_target["norm_text"] = df_target["heading_0"].apply(lambda x: enhanced_normalize(x, synonym_map))
-
-    vectorizer, ref_vectors = get_tfidf_vectors(df_reference)
-    target_vectors = vectorizer.transform(df_target["norm_text"])
-    similarity_matrix = cosine_similarity(target_vectors, ref_vectors)
-
-    matched_uids, matched_qs, scores, confs = [], [], [], []
-    for sim_row in similarity_matrix:
-        best_idx = sim_row.argmax()
-        best_score = sim_row[best_idx]
-        if best_score >= TFIDF_HIGH_CONFIDENCE:
-            conf = "✅ High"
-        elif best_score >= TFIDF_LOW_CONFIDENCE:
-            conf = "⚠️ Low"
-        else:
-            conf = "❌ No match"
-            best_idx = None
-        matched_uids.append(df_reference.iloc[best_idx]["uid"] if best_idx is not None else None)
-        matched_qs.append(df_reference.iloc[best_idx]["heading_0"] if best_idx is not None else None)
-        scores.append(round(best_score, 4))
-        confs.append(conf)
-
-    df_target["Suggested_UID"] = matched_uids
-    df_target["Matched_Question"] = matched_qs
-    df_target["Similarity"] = scores
-    df_target["Match_Confidence"] = confs
-    return df_target
-
-def compute_semantic_matches(df_reference, df_target):
-    try:
-        model = load_sentence_transformer()
-        emb_target = model.encode(df_target["heading_0"].tolist(), convert_to_tensor=True)
-        emb_ref = model.encode(df_reference["heading_0"].tolist(), convert_to_tensor=True)
-        cosine_scores = util.cos_sim(emb_target, emb_ref)
-
-        sem_matches, sem_scores = [], []
-        for i in range(len(df_target)):
-            best_idx = cosine_scores[i].argmax().item()
-            score = cosine_scores[i][best_idx].item()
-            sem_matches.append(df_reference.iloc[best_idx]["uid"] if score >= SEMANTIC_THRESHOLD else None)
-            sem_scores.append(round(score, 4) if score >= SEMANTIC_THRESHOLD else None)
-
-        df_target["Semantic_UID"] = sem_matches
-        df_target["Semantic_Similarity"] = sem_scores
-        return df_target
-    except Exception as e:
-        logger.error(f"Semantic matching failed: {e}")
-        st.error(f"Semantic matching failed: {e}")
-        return df_target
-
-def assign_match_type(row):
-    if pd.notnull(row["Suggested_UID"]):
-        return row["Match_Confidence"]
-    return "🧠 Semantic" if pd.notnull(row["Semantic_UID"]) else "❌ No match"
-
-def finalize_matches(df_target):
-    df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
-    df_target["Final_Question"] = df_target["Matched_Question"]
-    df_target["Final_Match_Type"] = df_target.apply(assign_match_type, axis=1)
-    return df_target
-
-def detect_uid_conflicts(df_target):
-    uid_conflicts = df_target.groupby("Final_UID")["heading_0"].nunique()
-    duplicate_uids = uid_conflicts[uid_conflicts > 1].index
-    df_target["UID_Conflict"] = df_target["Final_UID"].apply(
-        lambda x: "⚠️ Conflict" if x in duplicate_uids else ""
-    )
-    return df_target
-
-def run_uid_match(df_reference, df_target, synonym_map, batch_size=BATCH_SIZE):
-    if df_reference.empty or df_target.empty:
-        logger.warning("Empty input dataframes provided.")
-        st.error("Input data is empty.")
-        return pd.DataFrame()
-
-    if len(df_target) > 10000:
-        st.warning("Large dataset detected. Processing may take time.")
-
-    logger.info(f"Processing {len(df_target)} target questions against {len(df_reference)} reference questions.")
-    df_results = []
-    for start in range(0, len(df_target), batch_size):
-        batch_target = df_target.iloc[start:start + batch_size].copy()
-        with st.spinner(f"Processing batch {start//batch_size + 1}..."):
-            batch_target = compute_tfidf_matches(df_reference, batch_target, synonym_map)
-            batch_target = compute_semantic_matches(df_reference, batch_target)
-            batch_target = finalize_matches(batch_target)
-            batch_target = detect_uid_conflicts(batch_target)
-        df_results.append(batch_target)
-    
-    if not df_results:
-        logger.warning("No results from batch processing.")
-        return pd.DataFrame()
-    return pd.concat(df_results, ignore_index=True)
-
-# App UI
+# --- App UI ---
 st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 
-# Secrets Validation
-if "snowflake" not in st.secrets or "surveymonkey" not in st.secrets:
-    st.error("Missing secrets configuration for Snowflake or SurveyMonkey.")
-    st.stop()
-
-# Synonym Map Input
-st.subheader("Synonym Mapping")
-synonym_input = st.text_area("Edit Synonym Map (JSON)", value=str(DEFAULT_SYNONYM_MAP), height=100)
-try:
-    synonym_map = json.loads(synonym_input) if synonym_input else DEFAULT_SYNONYM_MAP
-    if not isinstance(synonym_map, dict):
-        raise ValueError("Synonym map must be a dictionary.")
-except (json.JSONDecodeError, ValueError) as e:
-    st.error(f"Invalid synonym map format: {e}")
-    synonym_map = DEFAULT_SYNONYM_MAP
-
-# Data Source Selection
-option = st.radio("Choose Data Source", ["SurveyMonkey", "Snowflake"], horizontal=True)
+option = st.radio("Choose Source", ["SurveyMonkey", "Snowflake"], horizontal=True)
 
 if option == "SurveyMonkey":
-    try:
-        token = st.secrets["surveymonkey"]["token"]
-        with st.spinner("Fetching surveys..."):
+    token = st.text_input("🔑 Enter SurveyMonkey Token", type="password")
+    if token:
+        try:
+            df_mapped = run_snowflake_query()
             surveys = get_surveys(token)
-        if not surveys:
-            st.error("No surveys found or invalid API response.")
-        else:
-            choices = {s["title"]: s["id"] for s in surveys}
-            selected_survey = st.selectbox("Choose Survey", list(choices.keys()))
-            if selected_survey:
-                with st.spinner("Fetching survey details..."):
-                    survey_json = get_survey_details(choices[selected_survey], token)
-                    questions = extract_questions(survey_json)
-                    df_target = pd.DataFrame({"heading_0": questions})
-                if df_target.empty:
-                    st.error("No questions found in the selected survey.")
-                else:
-                    df_reference = run_snowflake_reference_query()
-                    df_final = run_uid_match(df_reference, df_target, synonym_map)
-                    
-                    # Filter Results
-                    confidence_filter = st.multiselect(
-                        "Filter by Match Type",
-                        ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
-                        default=["✅ High", "⚠️ Low", "🧠 Semantic"]
-                    )
-                    filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
-                    
-                    st.dataframe(filtered_df)
-                    st.download_button(
-                        "📥 Download UID Matches",
-                        filtered_df.to_csv(index=False),
-                        f"uid_matches_{uuid4()}.csv"
-                    )
-    except Exception as e:
-        logger.error(f"SurveyMonkey processing failed: {e}")
-        st.error(f"Error: {e}")
+            choices = {s['title']: s['id'] for s in surveys}
+            selected = st.selectbox("Choose survey", list(choices.keys()))
+            if selected:
+                survey_json = get_survey_details(choices[selected], token)
+                questions = extract_questions(survey_json)
+                df_unmapped = pd.DataFrame({"heading_0": questions})
+                df_final = run_uid_match(df_mapped, df_unmapped)
+                st.dataframe(df_final)
+                st.download_button("📥 Download UID Matches", df_final.to_csv(index=False), "uid_matches.csv")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 if option == "Snowflake":
-    if st.button("🔁 Run Matching on Snowflake Data"):
-        with st.spinner("Fetching Snowflake data..."):
-            df_reference = run_snowflake_reference_query()
-            df_target = run_snowflake_target_query()
-        
-        if df_reference.empty or df_target.empty:
-            st.error("No data retrieved from Snowflake.")
-        else:
-            df_final = run_uid_match(df_reference, df_target, synonym_map)
-            
-            # Filter Results
-            confidence_filter = st.multiselect(
-                "Filter by Match Type",
-                ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
-                default=["✅ High", "⚠️ Low", "🧠 Semantic"]
-            )
-            filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
-            
-            st.dataframe(filtered_df)
-            st.download_button(
-                "📥 Download UID Matches",
-                filtered_df.to_csv(index=False),
-                f"uid_matches_{uuid4()}.csv"
-            )
-```
+    if st.button("🔁 Run Matching on Snowflake data"):
+        df_mapped = run_snowflake_query()
+        df_unmapped = pd.read_sql("""
+            SELECT DISTINCT HEADING_0 FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
+            WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
+        """, get_snowflake_engine())
+        df_final = run_uid_match(df_mapped, df_unmapped)
+        st.dataframe(df_final)
+        st.download_button("📥 Download UID Matches", df_final.to_csv(index=False), "uid_matches.csv")
