@@ -22,7 +22,7 @@ SEMANTIC_THRESHOLD = 0.60     # Threshold for semantic matches
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000             # Batch size for processing large datasets
 
-# Synonym Mapping
+# Synonym Mapping (used internally, not exposed in UI)
 DEFAULT_SYNONYM_MAP = {
     "please select": "what is",
     "sector you are from": "your sector",
@@ -60,7 +60,7 @@ def get_tfidf_vectors(df_reference):
     return vectorizer, vectors
 
 # Normalization
-def enhanced_normalize(text, synonym_map):
+def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
     text = str(text).lower()
     text = re.sub(r'\(.*?\)', '', text)  # Remove parenthetical content
     text = re.sub(r'[^a-z0-9 ]', '', text)  # Keep alphanumeric and spaces
@@ -142,19 +142,41 @@ def get_survey_details(survey_id, token):
 
 def extract_questions(survey_json):
     questions = []
+    global_position = 0  # Running counter for main questions
     for page in survey_json.get("pages", []):
         for question in page.get("questions", []):
             q_text = question.get("headings", [{}])[0].get("heading", "")
-            position = question.get("position", None)
+            api_position = question.get("position", None)
             q_id = question.get("id", None)
+            family = question.get("family", None)
+            subtype = question.get("subtype", None)
+            # Determine schema type
+            if family == "single_choice":
+                schema_type = "Single Choice"
+            elif family == "multiple_choice":
+                schema_type = "Multiple Choice"
+            elif family == "open_ended":
+                schema_type = "Open-Ended"
+            elif family == "matrix":
+                schema_type = "Matrix"
+            else:
+                # Infer based on choices
+                choices = question.get("answers", {}).get("choices", [])
+                schema_type = "Multiple Choice" if choices else "Open-Ended"
+                if choices and ("select one" in q_text.lower() or len(choices) <= 2):
+                    schema_type = "Single Choice"
+            
             if q_text:
+                global_position += 1  # Increment for main questions only
                 # Add the question
                 questions.append({
                     "heading_0": q_text,
-                    "position": position,
+                    "position": global_position,
                     "is_choice": False,
                     "parent_question": None,
-                    "question_id": q_id
+                    "question_id": q_id,
+                    "schema_type": schema_type,
+                    "mandatory": False
                 })
                 # Add choices for applicable question types
                 choices = question.get("answers", {}).get("choices", [])
@@ -163,19 +185,21 @@ def extract_questions(survey_json):
                     if choice_text:
                         questions.append({
                             "heading_0": f"{q_text} - {choice_text}",
-                            "position": position,
+                            "position": global_position,
                             "is_choice": True,
                             "parent_question": q_text,
-                            "question_id": q_id
+                            "question_id": q_id,
+                            "schema_type": schema_type,
+                            "mandatory": False  # Choices inherit parent's mandatory status
                         })
     return questions
 
 # UID Matching
-def compute_tfidf_matches(df_reference, df_target, synonym_map):
+def compute_tfidf_matches(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP):
     df_reference = df_reference[df_reference["heading_0"].notna()].reset_index(drop=True)
     df_target = df_target[df_target["heading_0"].notna()].reset_index(drop=True)
-    df_reference["norm_text"] = df_reference["heading_0"].apply(lambda x: enhanced_normalize(x, synonym_map))
-    df_target["norm_text"] = df_target["heading_0"].apply(lambda x: enhanced_normalize(x, synonym_map))
+    df_reference["norm_text"] = df_reference["heading_0"].apply(enhanced_normalize)
+    df_target["norm_text"] = df_target["heading_0"].apply(enhanced_normalize)
 
     vectorizer, ref_vectors = get_tfidf_vectors(df_reference)
     target_vectors = vectorizer.transform(df_target["norm_text"])
@@ -251,7 +275,7 @@ def detect_uid_conflicts(df_target):
     )
     return df_target
 
-def run_uid_match(df_reference, df_target, synonym_map, batch_size=BATCH_SIZE):
+def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batch_size=BATCH_SIZE):
     if df_reference.empty or df_target.empty:
         logger.warning("Empty input dataframes provided.")
         st.error("Input data is empty.")
@@ -276,6 +300,17 @@ def run_uid_match(df_reference, df_target, synonym_map, batch_size=BATCH_SIZE):
         return pd.DataFrame()
     return pd.concat(df_results, ignore_index=True)
 
+# Sidebar
+st.sidebar.title("SurveyMonkey Token")
+token = st.secrets.get("surveymonkey", {}).get("token", None)
+if st.sidebar.button("Test SurveyMonkey Token"):
+    with st.sidebar:
+        with st.spinner("Testing token..."):
+            if token and test_surveymonkey_token(token):
+                st.success("Token is valid! Surveys are accessible.")
+            else:
+                st.error("Token test failed. Check logs or token configuration.")
+
 # App UI
 st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 
@@ -284,29 +319,14 @@ if "snowflake" not in st.secrets or "surveymonkey" not in st.secrets:
     st.error("Missing secrets configuration for Snowflake or SurveyMonkey.")
     st.stop()
 
-# Synonym Map Input
-st.subheader("Synonym Mapping")
-synonym_input = st.text_area("Edit Synonym Map (JSON)", value=json.dumps(DEFAULT_SYNONYM_MAP, indent=2), height=100)
-try:
-    synonym_map = json.loads(synonym_input) if synonym_input.strip() else DEFAULT_SYNONYM_MAP
-    if not isinstance(synonym_map, dict):
-        raise ValueError("Synonym map must be a dictionary.")
-except (json.JSONDecodeError, ValueError) as e:
-    st.error(f"Invalid synonym map format: {e}. Ensure keys and values are enclosed in double quotes.")
-    synonym_map = DEFAULT_SYNONYM_MAP
-
 # Data Source Selection
 option = st.radio("Choose Data Source", ["SurveyMonkey", "Snowflake"], horizontal=True)
 
 if option == "SurveyMonkey":
     try:
-        token = st.secrets["surveymonkey"]["token"]
-        if st.button("Test SurveyMonkey Token"):
-            with st.spinner("Testing token..."):
-                if test_surveymonkey_token(token):
-                    st.success("Token is valid! Surveys are accessible.")
-                else:
-                    st.error("Token test failed. Check logs or token configuration.")
+        if not token:
+            st.error("SurveyMonkey token is missing in secrets configuration.")
+            st.stop()
         with st.spinner("Fetching surveys..."):
             surveys = get_surveys(token)
         if not surveys:
@@ -323,15 +343,44 @@ if option == "SurveyMonkey":
                 if df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    st.write("Survey questions and choices retrieved successfully. Click below to match UIDs.")
-                    # Display questions and choices
+                    st.write("Survey questions and choices retrieved successfully. Edit mandatory status and click below to match UIDs.")
+                    # Filter for main questions
+                    show_main_only = st.checkbox("Show only main questions", value=False)
+                    display_df = df_target[df_target["is_choice"] == False] if show_main_only else df_target
+                    
+                    # Editable table for mandatory status
                     st.subheader("Survey Questions and Choices")
-                    st.dataframe(df_target[["heading_0", "position", "is_choice", "parent_question"]])
+                    edited_df = st.data_editor(
+                        display_df,
+                        column_config={
+                            "mandatory": st.column_config.CheckboxColumn(
+                                "Mandatory",
+                                help="Mark question as mandatory",
+                                default=False,
+                                disabled=lambda x: x["is_choice"]  # Disable for choices
+                            ),
+                            "heading_0": st.column_config.TextColumn("Question/Choice"),
+                            "position": st.column_config.NumberColumn("Position"),
+                            "is_choice": st.column_config.CheckboxColumn("Is Choice"),
+                            "parent_question": st.column_config.TextColumn("Parent Question"),
+                            "schema_type": st.column_config.TextColumn("Schema Type"),
+                            "question_id": st.column_config.TextColumn("Question ID")
+                        },
+                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_id"],
+                        hide_index=True
+                    )
+                    
+                    # Update df_target with edited mandatory status
+                    if not edited_df.empty:
+                        df_target.update(edited_df[["heading_0", "mandatory"]])
                     
                     if st.button("Run UID Matching"):
                         with st.spinner("Running UID matching..."):
                             df_reference = run_snowflake_reference_query()
-                            df_final = run_uid_match(df_reference, df_target, synonym_map)
+                            df_final = run_uid_match(df_reference, df_target)
+                            
+                            # Apply filter to results
+                            display_final = df_final[df_final["is_choice"] == False] if show_main_only else df_final
                             
                             # Filter Results
                             confidence_filter = st.multiselect(
@@ -339,7 +388,7 @@ if option == "SurveyMonkey":
                                 ["✅ High", "⚠️ Low", "🧠 Semantic", "❌ No match"],
                                 default=["✅ High", "⚠️ Low", "🧠 Semantic"]
                             )
-                            filtered_df = df_final[df_final["Final_Match_Type"].isin(confidence_filter)]
+                            filtered_df = display_final[display_final["Final_Match_Type"].isin(confidence_filter)]
                             
                             st.subheader("UID Matching Results")
                             st.dataframe(filtered_df)
@@ -359,7 +408,7 @@ if option == "SurveyMonkey":
                     if add_question_method == "Google Form":
                         st.write(
                             "Submit a new question request via Google Form. "
-                            "Create a form with fields: Question Text, Question Type, Choices (optional), Program."
+                            "Create a form with fields: Question Text, Question Type, Choices (optional), Program, Mandatory."
                         )
                         st.markdown(
                             "[Placeholder Google Form](https://forms.gle/your_form_link) "
@@ -373,16 +422,18 @@ if option == "SurveyMonkey":
                         st.write("Use the following SQL query to add a new question to the question bank:")
                         new_question_sql = """
 INSERT INTO AMI_DBT.DBT_SURVEY_MONKEY.QUESTION_BANK
-(HEADING_0, UID, POSITION, CREATED_AT)
+(HEADING_0, UID, POSITION, SCHEMA_TYPE, MANDATORY, CREATED_AT)
 VALUES
-(:question_text, :uid, :position, CURRENT_TIMESTAMP);
+(:question_text, :uid, :position, :schema_type, :mandatory, CURRENT_TIMESTAMP);
 """
                         st.code(new_question_sql, language="sql")
                         st.write(
                             "Parameters:\n"
                             "- question_text: The question text (e.g., 'What is your favorite color?')\n"
                             "- uid: A unique identifier (e.g., generate via UUID)\n"
-                            "- position: The desired position (e.g., 1, 2, 3)"
+                            "- position: The desired position (e.g., 1, 2, 3)\n"
+                            "- schema_type: The question type (e.g., 'Single Choice', 'Multiple Choice', 'Open-Ended')\n"
+                            "- mandatory: Boolean (TRUE/FALSE)"
                         )
                         st.write(
                             "Execute this query in Snowflake after replacing parameters. "
@@ -401,7 +452,7 @@ if option == "Snowflake":
         if df_reference.empty or df_target.empty:
             st.error("No data retrieved from Snowflake.")
         else:
-            df_final = run_uid_match(df_reference, df_target, synonym_map)
+            df_final = run_uid_match(df_reference, df_target)
             
             # Filter Results
             confidence_filter = st.multiselect(
