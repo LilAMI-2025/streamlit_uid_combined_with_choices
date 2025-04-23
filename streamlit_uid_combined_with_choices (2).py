@@ -176,7 +176,8 @@ def extract_questions(survey_json):
                     "parent_question": None,
                     "question_id": q_id,
                     "schema_type": schema_type,
-                    "mandatory": False
+                    "mandatory": False,
+                    "mandatory_editable": True  # Main questions can edit mandatory
                 })
                 # Add choices for applicable question types
                 choices = question.get("answers", {}).get("choices", [])
@@ -190,14 +191,15 @@ def extract_questions(survey_json):
                             "parent_question": q_text,
                             "question_id": q_id,
                             "schema_type": schema_type,
-                            "mandatory": False  # Choices inherit parent's mandatory status
+                            "mandatory": False,
+                            "mandatory_editable": False  # Choices cannot edit mandatory
                         })
     return questions
 
 # UID Matching
 def compute_tfidf_matches(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP):
     df_reference = df_reference[df_reference["heading_0"].notna()].reset_index(drop=True)
-    df_target = df_target[df_target["heading_0"].notna()].reset_index(drop=True)
+    df_target = df_target[df_reference["heading_0"].notna()].reset_index(drop=True)
     df_reference["norm_text"] = df_reference["heading_0"].apply(enhanced_normalize)
     df_target["norm_text"] = df_target["heading_0"].apply(enhanced_normalize)
 
@@ -356,8 +358,12 @@ if option == "SurveyMonkey":
                             "mandatory": st.column_config.CheckboxColumn(
                                 "Mandatory",
                                 help="Mark question as mandatory",
-                                default=False,
-                                disabled=lambda x: x["is_choice"]  # Disable for choices
+                                default=False
+                            ),
+                            "mandatory_editable": st.column_config.CheckboxColumn(
+                                "Editable",
+                                help="Indicates if mandatory can be edited",
+                                disabled=True
                             ),
                             "heading_0": st.column_config.TextColumn("Question/Choice"),
                             "position": st.column_config.NumberColumn("Position"),
@@ -366,13 +372,15 @@ if option == "SurveyMonkey":
                             "schema_type": st.column_config.TextColumn("Schema Type"),
                             "question_id": st.column_config.TextColumn("Question ID")
                         },
-                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_id"],
+                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_id", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
                         hide_index=True
                     )
                     
-                    # Update df_target with edited mandatory status
+                    # Update df_target with edited mandatory status for editable rows
                     if not edited_df.empty:
-                        df_target.update(edited_df[["heading_0", "mandatory"]])
+                        editable_rows = df_target[df_target["mandatory_editable"]]
+                        if not editable_rows.empty:
+                            df_target.loc[df_target["mandatory_editable"], "mandatory"] = edited_df[edited_df["mandatory_editable"]]["mandatory"]
                     
                     if st.button("Run UID Matching"):
                         with st.spinner("Running UID matching..."):
