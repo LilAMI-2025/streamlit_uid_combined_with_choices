@@ -88,7 +88,7 @@ def run_snowflake_target_query():
     query = """
         SELECT DISTINCT HEADING_0
         FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
-        WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
+        WHERE UID IS NOT NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
     """
     try:
         with get_snowflake_engine().connect() as conn:
@@ -99,24 +99,6 @@ def run_snowflake_target_query():
         raise
 
 # SurveyMonkey API
-def test_surveymonkey_token(token):
-    url = "https://api.surveymonkey.com/v3/surveys"
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        logger.info("Token is valid! Retrieved surveys:")
-        for survey in data.get("data", []):
-            logger.info(f"- {survey['title']} (ID: {survey['id']})")
-        return True
-    except requests.HTTPError as e:
-        logger.error(f"HTTP Error: {e.response.status_code} - {e.response.text}")
-        return False
-    except requests.RequestException as e:
-        logger.error(f"Request failed: {e}")
-        return False
-
 def get_surveys(token):
     url = "https://api.surveymonkey.com/v3/surveys"
     headers = {"Authorization": f"Bearer {token}"}
@@ -250,11 +232,14 @@ def assign_match_type(row):
         return row["Match_Confidence"]
     return "🧠 Semantic" if pd.notnull(row["Semantic_UID"]) else "❌ No match"
 
-def finalize_matches(df_target):
+def finalize_matches(df_target, df_reference):
     df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
     df_target["configured_final_UID"] = df_target["Final_UID"]
     df_target["Final_Question"] = df_target["Matched_Question"]
     df_target["Final_Match_Type"] = df_target.apply(assign_match_type, axis=1)
+    df_target["Change_UID"] = df_target["Final_UID"].apply(
+        lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
+    )
     
     df_target["Final_UID"] = df_target.apply(
         lambda row: df_target[df_target["heading_0"] == row["parent_question"]]["Final_UID"].iloc[0]
@@ -262,13 +247,16 @@ def finalize_matches(df_target):
         axis=1
     )
     df_target["configured_final_UID"] = df_target["Final_UID"]
+    df_target["Change_UID"] = df_target["Final_UID"].apply(
+        lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
+    )
     return df_target
 
 def detect_uid_conflicts(df_target):
     uid_conflicts = df_target.groupby("Final_UID")["heading_0"].nunique()
     duplicate_uids = uid_conflicts[uid_conflicts > 1].index
     df_target["UID_Conflict"] = df_target["Final_UID"].apply(
-        lambda x: "⚠️ Conflict" if x in duplicate_uids else ""
+        lambda x: "⚠️ Conflict" if pd.notnull(x) and x in duplicate_uids else ""
     )
     return df_target
 
@@ -288,7 +276,7 @@ def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batc
         with st.spinner(f"Processing batch {start//batch_size + 1}..."):
             batch_target = compute_tfidf_matches(df_reference, batch_target, synonym_map)
             batch_target = compute_semantic_matches(df_reference, batch_target)
-            batch_target = finalize_matches(batch_target)
+            batch_target = finalize_matches(batch_target, df_reference)
             batch_target = detect_uid_conflicts(batch_target)
         df_results.append(batch_target)
     
@@ -340,7 +328,6 @@ if option == "SurveyMonkey":
                 if st.session_state.df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    # Automatically run UID matching
                     with st.spinner("Running UID matching..."):
                         df_reference = run_snowflake_reference_query()
                         st.session_state.df_final = run_uid_match(df_reference, st.session_state.df_target)
@@ -409,11 +396,6 @@ if option == "SurveyMonkey":
                             df_reference = run_snowflake_reference_query()
                             uid_options = [None] + [f"{row['uid']} - {row['heading_0']}" for _, row in df_reference.iterrows()]
                             
-                            if "Change_UID" not in result_df.columns:
-                                result_df["Change_UID"] = result_df["Final_UID"].apply(
-                                    lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
-                                )
-                            
                             result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                             display_df = result_df[result_columns].copy()
                             display_df = display_df.rename(columns={"heading_0": "Question/Choice", "Final_UID": "final_UID"})
@@ -440,10 +422,12 @@ if option == "SurveyMonkey":
                             
                             # Update Final_UID and configured_final_UID
                             for idx, row in edited_df.iterrows():
-                                if row["Change_UID"] and row["Change_UID"] != st.session_state.df_final.at[idx, "Change_UID"]:
+                                current_change_uid = st.session_state.df_final.at[idx, "Change_UID"] if "Change_UID" in st.session_state.df_final.columns else None
+                                if pd.notnull(row["Change_UID"]) and row["Change_UID"] != current_change_uid:
                                     new_uid = row["Change_UID"].split(" - ")[0] if row["Change_UID"] and " - " in row["Change_UID"] else None
                                     st.session_state.df_final.at[idx, "Final_UID"] = new_uid
                                     st.session_state.df_final.at[idx, "configured_final_UID"] = new_uid
+                                    st.session_state.df_final.at[idx, "Change_UID"] = row["Change_UID"]
                                     st.session_state.uid_changes[idx] = new_uid
                             
                             # Create New Questions
