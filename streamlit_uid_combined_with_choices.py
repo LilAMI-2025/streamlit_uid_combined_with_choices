@@ -141,7 +141,7 @@ st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 option = st.radio("Choose Source", ["SurveyMonkey", "Snowflake"], horizontal=True)
 
 if option == "SurveyMonkey":
-    token = st.text_input("🔑 Enter SurveyMonkey Token", type="password")
+    token = st.secrets["surveymonkey"]["token"]
     if token:
         try:
             df_mapped = run_snowflake_query()
