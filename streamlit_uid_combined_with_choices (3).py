@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -58,8 +57,8 @@ def get_snowflake_engine():
         if "250001" in str(e):
             st.warning(
                 "Snowflake connection failed: User account is temporarily locked. "
-                "UID matching and survey name loading are disabled. "
-                "Contact your Snowflake administrator to unlock the account or wait and retry. "
+                "UID matching and survey names are disabled, but you can edit questions and use Google Forms. "
+                "Contact your Snowflake admin or wait 15–30 minutes. "
                 "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
             )
         raise
@@ -96,9 +95,9 @@ def run_snowflake_reference_query(limit=10000, offset=0):
         logger.error(f"Snowflake reference query failed: {e}")
         if "250001" in str(e):
             st.warning(
-                "Cannot fetch reference data from Snowflake: User account is locked. "
-                "UID matching and survey name loading are disabled. "
-                "Please resolve the account lockout and retry."
+                "Cannot fetch Snowflake data: User account is locked. "
+                "UID matching and survey names are disabled. "
+                "Please resolve the lockout and retry."
             )
         raise
 
@@ -116,8 +115,8 @@ def run_snowflake_target_query():
         logger.error(f"Snowflake target query failed: {e}")
         if "250001" in str(e):
             st.warning(
-                "Cannot fetch target data from Snowflake: User account is locked. "
-                "Please resolve the account lockout and retry."
+                "Cannot fetch Snowflake data: User account is locked. "
+                "Please resolve the lockout and retry."
             )
         raise
 
@@ -353,9 +352,9 @@ if option == "SurveyMonkey":
                 if st.session_state.df_target.empty:
                     st.error("No questions found in the selected survey.")
                 else:
-                    # Attempt UID matching and populate all tabs
+                    # Run UID matching and populate tabs
                     try:
-                        with st.spinner("Running UID matching..."):
+                        with st.spinner("Matching questions to UIDs..."):
                             st.session_state.df_reference = run_snowflake_reference_query()
                             st.session_state.df_final = run_uid_match(st.session_state.df_reference, st.session_state.df_target)
                             st.session_state.uid_changes = {}
@@ -363,9 +362,9 @@ if option == "SurveyMonkey":
                         logger.error(f"UID matching failed: {e}")
                         if "250001" in str(e):
                             st.warning(
-                                "Snowflake connection failed: User account is temporarily locked. "
-                                "UID matching and survey name loading are disabled, but you can still edit survey questions and use Google Forms. "
-                                "Contact your Snowflake administrator to unlock the account or wait and retry. "
+                                "Snowflake connection failed: User account is locked. "
+                                "UID matching and survey names are disabled, but you can edit questions, search, and use Google Forms. "
+                                "Contact your Snowflake admin or wait 15–30 minutes. "
                                 "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
                             )
                             st.session_state.df_reference = None
@@ -383,7 +382,7 @@ if option == "SurveyMonkey":
 
                     # Tab 1: Survey Questions and Choices
                     with tab1:
-                        st.write("Edit mandatory status for questions. Proceed to next tab for UID matching.")
+                        st.write("Edit mandatory status for questions/choices. Go to next tab for UID matching.")
                         show_main_only = st.checkbox("Show only main questions", value=False)
                         display_df = st.session_state.df_target[st.session_state.df_target["is_choice"] == False] if show_main_only else st.session_state.df_target
                         
@@ -397,7 +396,7 @@ if option == "SurveyMonkey":
                                 ),
                                 "mandatory_editable": st.column_config.CheckboxColumn(
                                     "Editable",
-                                    help="Indicates if mandatory can be edited",
+                                    help="Can mandatory status be edited?",
                                     disabled=True
                                 ),
                                 "heading_0": st.column_config.TextColumn("Question/Choice"),
@@ -419,9 +418,9 @@ if option == "SurveyMonkey":
                     # Tab 2: UID Matching and Configuration
                     with tab2:
                         if st.session_state.df_final is not None:
-                            st.subheader("UID Matching Results")
+                            st.subheader("UID Matching for Questions/Choices")
                             if st.session_state.df_final["Final_UID"].isna().all():
-                                st.info("UID matching is disabled due to Snowflake connection issues. Assign UIDs manually or resolve the connection.")
+                                st.info("UID matching disabled due to Snowflake issues. Assign UIDs manually or fix the connection.")
                             
                             show_main_only = st.checkbox("Show only main questions", value=False, key="tab2_main_only")
                             match_filter = st.selectbox(
@@ -430,12 +429,12 @@ if option == "SurveyMonkey":
                                 index=0
                             )
                             
-                            # Search Questions with Dropdown
-                            st.subheader("Search Questions")
+                            # Search Questions
+                            st.subheader("Search Questions/Choices")
                             question_options = [""] + st.session_state.df_target[st.session_state.df_target["is_choice"] == False]["heading_0"].tolist()
-                            search_query = st.text_input("Type to filter questions", "")
+                            search_query = st.text_input("Type to filter questions/choices", "")
                             filtered_questions = [q for q in question_options if not search_query or search_query.lower() in q.lower()]
-                            selected_question = st.selectbox("Select a question", filtered_questions, index=0)
+                            selected_question = st.selectbox("Select a question/choice", filtered_questions, index=0)
                             
                             result_df = st.session_state.df_final.copy()
                             if selected_question:
@@ -446,12 +445,12 @@ if option == "SurveyMonkey":
                                 result_df = result_df[result_df["Final_UID"].isna()]
                             result_df = result_df[result_df["is_choice"] == False] if show_main_only else result_df
                             
-                            # Prepare UID dropdown options
+                            # UID dropdown
                             uid_options = [None]
                             if st.session_state.df_reference is not None:
                                 uid_options += [f"{row['uid']} - {row['heading_0']}" for _, row in st.session_state.df_reference.iterrows()]
                             else:
-                                st.warning("UID options unavailable due to Snowflake connection issues. Resolve the connection to load UIDs.")
+                                st.warning("UID options unavailable due to Snowflake issues. Fix connection to load UIDs.")
                             
                             result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                             display_df = result_df[result_columns].copy()
@@ -468,7 +467,7 @@ if option == "SurveyMonkey":
                                     "schema_type": st.column_config.TextColumn("Schema Type"),
                                     "Change_UID": st.column_config.SelectboxColumn(
                                         "Change UID",
-                                        help="Select an existing UID from Snowflake (searchable)",
+                                        help="Select a UID from Snowflake",
                                         options=uid_options,
                                         default=None
                                     )
@@ -477,7 +476,7 @@ if option == "SurveyMonkey":
                                 hide_index=True
                             )
                             
-                            # Update Final_UID and configured_final_UID
+                            # Update UIDs
                             for idx, row in edited_df.iterrows():
                                 current_change_uid = st.session_state.df_final.at[idx, "Change_UID"] if "Change_UID" in st.session_state.df_final.columns else None
                                 if pd.notnull(row["Change_UID"]) and row["Change_UID"] != current_change_uid:
@@ -487,28 +486,18 @@ if option == "SurveyMonkey":
                                     st.session_state.df_final.at[idx, "Change_UID"] = row["Change_UID"]
                                     st.session_state.uid_changes[idx] = new_uid
                             
-                            # Create New Questions
+                            # New Questions
                             st.subheader("Create New Questions")
-                            st.write(
-                                "To add a new question, submit a request via Google Form. "
-                                "Required fields: Question Text, Question Type, Choices (optional), Program, Mandatory."
-                            )
-                            st.markdown(
-                                "[Submit New Question](https://docs.google.com/forms/d/1LoY_La59UJ4ZsuxckM8Wl52kVeLI7a1t1MF8zIQxGUs)"
-                            )
+                            st.write("Submit new questions via Google Form. Fields: Question Text, Type, Choices, Program, Mandatory.")
+                            st.markdown("[Submit New Question](https://docs.google.com/forms/d/1LoY_La59UJ4ZsuxckM8Wl52kVeLI7a1t1MF8zIQxGUs)")
                             
-                            # Create New UID
+                            # New UID
                             st.subheader("Create New UID")
-                            st.write(
-                                "To assign a new UID, submit a request via Google Form. "
-                                "Required fields: Question Text, Proposed UID, Program, Question Type, Mandatory."
-                            )
-                            st.markdown(
-                                "[Submit New UID](https://docs.google.com/forms/d/1lkhfm1-t5-zwLxfbVEUiHewveLpGXv5yEVRlQx5XjxA)"
-                            )
+                            st.write("Submit new UIDs via Google Form. Fields: Question Text, Proposed UID, Program, Type, Mandatory.")
+                            st.markdown("[Submit New UID](https://docs.google.com/forms/d/1lkhfm1-t5-zwLxfbVEUiHewveLpGXv5yEVRlQx5XjxA)")
                             
-                            # Customize Pre-existing Questions
-                            st.subheader("Customize Pre-existing Questions")
+                            # Customize Questions
+                            st.subheader("Customize Questions/Choices")
                             customize_df = pd.DataFrame({
                                 "Survey Name": [None],
                                 "Pre-existing Question": [None],
@@ -518,14 +507,14 @@ if option == "SurveyMonkey":
                             if st.session_state.df_reference is not None:
                                 survey_options += st.session_state.df_reference["SURVEY_NAME"].dropna().unique().tolist()
                             else:
-                                st.warning("Survey names unavailable due to Snowflake connection issues. Resolve the connection to load survey names.")
+                                st.warning("Survey names unavailable due to Snowflake issues. Fix connection to load names.")
                             
                             customize_edited_df = st.data_editor(
                                 customize_df,
                                 column_config={
                                     "Survey Name": st.column_config.SelectboxColumn(
                                         "Survey Name",
-                                        help="Select a survey to filter questions",
+                                        help="Select a survey",
                                         options=survey_options,
                                         default=None
                                     ),
@@ -537,7 +526,7 @@ if option == "SurveyMonkey":
                                     ),
                                     "Customized Question": st.column_config.TextColumn(
                                         "Customized Question",
-                                        help="Edit the question text",
+                                        help="Edit question text",
                                         default=""
                                     )
                                 },
@@ -545,14 +534,14 @@ if option == "SurveyMonkey":
                                 num_rows="dynamic"
                             )
                             
-                            # Dynamically update Pre-existing Question options
+                            # Update question options
                             for idx, row in customize_edited_df.iterrows():
                                 if row["Survey Name"]:
                                     question_options = [None]
                                     if st.session_state.df_reference is not None:
                                         question_options += st.session_state.df_reference[st.session_state.df_reference["SURVEY_NAME"] == row["Survey Name"]]["heading_0"].tolist()
                                     else:
-                                        st.warning("Questions unavailable due to Snowflake connection issues. Resolve the connection to load questions.")
+                                        st.warning("Questions unavailable due to Snowflake issues. Fix connection to load questions.")
                                     customize_edited_df.at[idx, "Pre-existing Question"] = st.session_state.get(f"question_{idx}", None)
                                     st.session_state[f"question_{idx}"] = st.selectbox(
                                         "Pre-existing Question",
@@ -561,7 +550,7 @@ if option == "SurveyMonkey":
                                         index=question_options.index(row["Pre-existing Question"]) if row["Pre-existing Question"] in question_options else 0
                                     )
                             
-                            # Update customized questions
+                            # Save customized questions
                             for _, row in customize_edited_df.iterrows():
                                 if row["Survey Name"] and row["Pre-existing Question"] and row["Customized Question"]:
                                     original_question = row["Pre-existing Question"]
@@ -579,9 +568,9 @@ if option == "SurveyMonkey":
                                         })
                                         st.session_state.custom_questions = pd.concat([st.session_state.custom_questions, new_row], ignore_index=True)
                             
-                            # Display Customized Questions
+                            # Show customized questions
                             if not st.session_state.custom_questions.empty:
-                                st.subheader("Customized Questions")
+                                st.subheader("Customized Questions/Choices")
                                 st.dataframe(st.session_state.custom_questions)
 
                     # Tab 3: Configured Survey
@@ -632,7 +621,7 @@ if option == "Snowflake":
             if "250001" in str(e):
                 st.error(
                     "Snowflake connection failed: User account is locked. "
-                    "Please contact your Snowflake administrator or wait and retry."
+                    "Contact your Snowflake admin or wait 15–30 minutes."
                 )
             else:
                 st.error(f"Error: {e}")
