@@ -4,11 +4,14 @@ import requests
 import re
 import logging
 import json
+import time
+import os
 from uuid import uuid4
 from sqlalchemy import create_engine, text
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Setup
 st.set_page_config(page_title="UID Matcher Combined", layout="wide")
@@ -21,6 +24,9 @@ TFIDF_LOW_CONFIDENCE = 0.50
 SEMANTIC_THRESHOLD = 0.60
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000
+CACHE_FILE = "survey_cache.json"
+REQUEST_DELAY = 0.5  # Delay between API calls in seconds
+MAX_SURVEYS_PER_BATCH = 10  # Number of surveys to fetch per batch
 
 # Synonym Mapping
 DEFAULT_SYNONYM_MAP = {
@@ -68,6 +74,36 @@ def get_tfidf_vectors(df_reference):
     vectorizer = TfidfVectorizer(ngram_range=(1, 2))
     vectors = vectorizer.fit_transform(df_reference["norm_text"])
     return vectorizer, vectors
+
+# Cache Management
+def load_cached_survey_data():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                cache = json.load(f)
+            cache_time = cache.get("timestamp", 0)
+            if time.time() - cache_time < 24 * 3600:  # Cache valid for 24 hours
+                return (
+                    pd.DataFrame(cache.get("all_questions", [])),
+                    cache.get("dedup_questions", []),
+                    cache.get("dedup_choices", [])
+                )
+        except Exception as e:
+            logger.error(f"Failed to load cache: {e}")
+    return None, [], []
+
+def save_cached_survey_data(all_questions, dedup_questions, dedup_choices):
+    cache = {
+        "timestamp": time.time(),
+        "all_questions": all_questions.to_dict(orient="records"),
+        "dedup_questions": dedup_questions,
+        "dedup_choices": dedup_choices
+    }
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception as e:
+        logger.error(f"Failed to save cache: {e}")
 
 # Normalization
 def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
@@ -151,7 +187,8 @@ def run_snowflake_target_query():
         raise
 
 # SurveyMonkey API
-def get_surveys(token):
+@st.cache_data
+def get_surveys_cached(token):
     url = "https://api.surveymonkey.com/v3/surveys"
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -162,11 +199,19 @@ def get_surveys(token):
         logger.error(f"Failed to fetch surveys: {e}")
         raise
 
-def get_survey_details(survey_id, token):
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type(requests.HTTPError),
+    before_sleep=lambda retry_state: logger.info(f"Retrying API call due to 429 error, attempt {retry_state.attempt_number}")
+)
+def get_survey_details_with_retry(survey_id, token):
     url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/details"
     headers = {"Authorization": f"Bearer {token}"}
     try:
         response = requests.get(url, headers=headers)
+        if response.status_code == 429:
+            raise requests.HTTPError("429 Too Many Requests")
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
@@ -428,6 +473,8 @@ if "df_reference" not in st.session_state:
     st.session_state.df_reference = None
 if "survey_template" not in st.session_state:
     st.session_state.survey_template = None
+if "preview_template" not in st.session_state:
+    st.session_state.preview_template = None
 if "all_questions" not in st.session_state:
     st.session_state.all_questions = None
 if "dedup_questions" not in st.session_state:
@@ -436,6 +483,8 @@ if "dedup_choices" not in st.session_state:
     st.session_state.dedup_choices = []
 if "mode" not in st.session_state:
     st.session_state.mode = None
+if "fetched_survey_ids" not in st.session_state:
+    st.session_state.fetched_survey_ids = []
 
 if option == "SurveyMonkey":
     try:
@@ -444,26 +493,19 @@ if option == "SurveyMonkey":
             st.error("SurveyMonkey token is missing in secrets configuration.")
             st.stop()
         with st.spinner("Fetching surveys..."):
-            surveys = get_surveys(token)
+            surveys = get_surveys_cached(token)
             if not surveys:
                 st.error("No surveys found or invalid API response.")
                 st.stop()
             
-            # Fetch all questions for deduplicated lists
+            # Load cached survey data
             if st.session_state.all_questions is None:
-                all_questions = []
-                for survey in surveys:
-                    survey_json = get_survey_details(survey["id"], token)
-                    questions = extract_questions(survey_json)
-                    all_questions.extend(questions)
-                
-                st.session_state.all_questions = pd.DataFrame(all_questions)
-                st.session_state.dedup_questions = sorted(st.session_state.all_questions[
-                    st.session_state.all_questions["is_choice"] == False
-                ]["heading_0"].unique().tolist())
-                st.session_state.dedup_choices = sorted(st.session_state.all_questions[
-                    st.session_state.all_questions["is_choice"] == True
-                ]["heading_0"].apply(lambda x: x.split(" - ", 1)[1] if " - " in x else x).unique().tolist())
+                cached_questions, cached_dedup_questions, cached_dedup_choices = load_cached_survey_data()
+                if cached_questions is not None:
+                    st.session_state.all_questions = cached_questions
+                    st.session_state.dedup_questions = cached_dedup_questions
+                    st.session_state.dedup_choices = cached_dedup_choices
+                    st.session_state.fetched_survey_ids = cached_questions["survey_id"].unique().tolist()
         
         # Prepare choices for both filters
         choices = {s["title"]: s["id"] for s in surveys}
@@ -505,7 +547,8 @@ if option == "SurveyMonkey":
                 combined_questions = []
                 for survey_id in all_selected_survey_ids:
                     with st.spinner(f"Fetching survey questions for ID {survey_id}..."):
-                        survey_json = get_survey_details(survey_id, token)
+                        survey_json = get_survey_details_with_retry(survey_id, token)
+                        time.sleep(REQUEST_DELAY)
                         questions = extract_questions(survey_json)
                         combined_questions.extend(questions)
             
@@ -798,6 +841,52 @@ if option == "SurveyMonkey":
         with tab4:
             st.subheader("Create New Survey")
             
+            # Refresh survey data
+            if st.button("🔄 Refresh Survey Data"):
+                st.session_state.all_questions = None
+                st.session_state.dedup_questions = []
+                st.session_state.dedup_choices = []
+                st.session_state.fetched_survey_ids = []
+                if os.path.exists(CACHE_FILE):
+                    os.remove(CACHE_FILE)
+                st.experimental_rerun()
+            
+            # Load more surveys for deduplicated lists
+            if st.session_state.all_questions is None or len(st.session_state.fetched_survey_ids) < len(surveys):
+                remaining_surveys = [s for s in surveys if s["id"] not in st.session_state.fetched_survey_ids]
+                if remaining_surveys and st.button(f"📥 Load More Surveys ({len(remaining_surveys)} remaining)"):
+                    batch_surveys = remaining_surveys[:MAX_SURVEYS_PER_BATCH]
+                    all_questions = st.session_state.all_questions if st.session_state.all_questions is not None else pd.DataFrame()
+                    try:
+                        with st.spinner(f"Fetching {len(batch_surveys)} surveys..."):
+                            for survey in batch_surveys:
+                                survey_json = get_survey_details_with_retry(survey["id"], token)
+                                questions = extract_questions(survey_json)
+                                all_questions = pd.concat([all_questions, pd.DataFrame(questions)], ignore_index=True)
+                                st.session_state.fetched_survey_ids.append(survey["id"])
+                                time.sleep(REQUEST_DELAY)
+                        
+                        st.session_state.all_questions = all_questions
+                        st.session_state.dedup_questions = sorted(st.session_state.all_questions[
+                            st.session_state.all_questions["is_choice"] == False
+                        ]["heading_0"].unique().tolist())
+                        st.session_state.dedup_choices = sorted(st.session_state.all_questions[
+                            st.session_state.all_questions["is_choice"] == True
+                        ]["heading_0"].apply(lambda x: x.split(" - ", 1)[1] if " - " in x else x).unique().tolist())
+                        save_cached_survey_data(
+                            st.session_state.all_questions,
+                            st.session_state.dedup_questions,
+                            st.session_state.dedup_choices
+                        )
+                        st.success(f"Loaded {len(batch_surveys)} surveys. {len(remaining_surveys) - len(batch_surveys)} remaining.")
+                    except requests.HTTPError as e:
+                        if "429" in str(e):
+                            st.error("Rate limit exceeded. Please wait a few minutes and try again or refresh later.")
+                        else:
+                            st.error(f"Failed to fetch surveys: {e}")
+                    except Exception as e:
+                        st.error(f"Failed to fetch surveys: {e}")
+            
             # Buttons for creation modes
             col1, col2 = st.columns(2)
             with col1:
@@ -821,7 +910,7 @@ if option == "SurveyMonkey":
                     selected_survey_ids = [s.split(" - ")[0] for s in selected_surveys]
                     selected_questions = st.session_state.all_questions[
                         st.session_state.all_questions["survey_id"].isin(selected_survey_ids)
-                    ].copy() if selected_survey_ids else pd.DataFrame()
+                    ].copy() if selected_survey_ids and st.session_state.all_questions is not None else pd.DataFrame()
                     
                     if not selected_questions.empty:
                         selected_questions["survey_id_title"] = selected_questions.apply(
@@ -907,11 +996,19 @@ if option == "SurveyMonkey":
                     survey_title = st.text_input("Survey Title", value="New Survey from Pre-existing")
                     survey_language = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
                     
-                    submit = st.form_submit_button("Create Survey")
-                    if submit:
+                    # Add Preview and Create Survey buttons
+                    col_preview, col_create = st.columns(2)
+                    with col_preview:
+                        preview = st.form_submit_button("👁️ Preview")
+                    with col_create:
+                        submit = st.form_submit_button("Create Survey")
+                    
+                    # Process Preview or Create Survey
+                    if preview or submit:
                         if not survey_title or edited_df.empty:
                             st.error("Survey title and at least one question are required.")
                         else:
+                            # Generate survey template
                             questions = []
                             position = 1
                             for idx, row in edited_df.iterrows():
@@ -967,20 +1064,30 @@ if option == "SurveyMonkey":
                                 }
                             }
                             
-                            try:
-                                with st.spinner("Creating survey in SurveyMonkey..."):
-                                    survey_id = create_survey(token, survey_template)
-                                    for page_template in survey_template["pages"]:
-                                        page_id = create_page(token, survey_id, page_template)
-                                        for question_template in page_template["questions"]:
-                                            create_question(token, survey_id, page_id, question_template)
-                                    st.success(f"Survey created successfully! Survey ID: {survey_id}")
-                                    st.session_state.survey_template = survey_template
-                            except Exception as e:
-                                st.error(f"Failed to create survey: {e}")
+                            if preview:
+                                # Store and display preview
+                                st.session_state.preview_template = survey_template
+                                st.success("Preview generated successfully!")
+                                st.subheader("Survey Preview")
+                                st.json(st.session_state.preview_template)
+                            
+                            if submit:
+                                # Use previewed template if available, else use newly generated
+                                template_to_use = st.session_state.preview_template if st.session_state.preview_template else survey_template
+                                try:
+                                    with st.spinner("Creating survey in SurveyMonkey..."):
+                                        survey_id = create_survey(token, template_to_use)
+                                        for page_template in template_to_use["pages"]:
+                                            page_id = create_page(token, survey_id, page_template)
+                                            for question_template in page_template["questions"]:
+                                                create_question(token, survey_id, page_id, question_template)
+                                        st.success(f"Survey created successfully! Survey ID: {survey_id}")
+                                        st.session_state.survey_template = template_to_use
+                                except Exception as e:
+                                    st.error(f"Failed to create survey: {e}")
                 
                 if st.session_state.survey_template:
-                    st.subheader("Preview Survey Template")
+                    st.subheader("Created Survey Template")
                     st.json(st.session_state.survey_template)
             
             # Create New Template
