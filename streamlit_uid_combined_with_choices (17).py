@@ -225,7 +225,7 @@ def create_question(token, survey_id, page_id, question_template):
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         return response.json().get("id")
-    except requests.RequestException as e:
+    except Exception as e:
         logger.error(f"Failed to create question for page {page_id}: {e}")
         raise
 
@@ -262,7 +262,9 @@ def extract_questions(survey_json):
                     "question_uid": q_id,
                     "schema_type": schema_type,
                     "mandatory": False,
-                    "mandatory_editable": True
+                    "mandatory_editable": True,
+                    "survey_id": survey_json.get("id", ""),
+                    "survey_title": survey_json.get("title", "")
                 })
                 choices = question.get("answers", {}).get("choices", [])
                 for choice in choices:
@@ -276,7 +278,9 @@ def extract_questions(survey_json):
                             "question_uid": q_id,
                             "schema_type": schema_type,
                             "mandatory": False,
-                            "mandatory_editable": False
+                            "mandatory_editable": False,
+                            "survey_id": survey_json.get("id", ""),
+                            "survey_title": survey_json.get("title", "")
                         })
     return questions
 
@@ -358,6 +362,14 @@ def finalize_matches(df_target, df_reference):
     df_target["Change_UID"] = df_target["Final_UID"].apply(
         lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
     )
+    
+    # Add survey_id_title to df_target
+    if "survey_id" in df_target.columns and "survey_title" in df_target.columns:
+        df_target["survey_id_title"] = df_target.apply(
+            lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
+            axis=1
+        )
+    
     return df_target
 
 def detect_uid_conflicts(df_target):
@@ -472,10 +484,6 @@ if option == "SurveyMonkey":
                         with st.spinner(f"Fetching survey questions for ID {survey_id}..."):
                             survey_json = get_survey_details(survey_id, token)
                             questions = extract_questions(survey_json)
-                            survey_title = next(s["title"] for s in surveys if s["id"] == survey_id)
-                            for q in questions:
-                                q["survey_id"] = survey_id
-                                q["survey_title"] = survey_title
                             combined_questions.extend(questions)
                 
                     st.session_state.df_target = pd.DataFrame(combined_questions)
@@ -501,6 +509,10 @@ if option == "SurveyMonkey":
                                 st.session_state.df_final["Final_UID"] = None
                                 st.session_state.df_final["configured_final_UID"] = None
                                 st.session_state.df_final["Change_UID"] = None
+                                st.session_state.df_final["survey_id_title"] = st.session_state.df_final.apply(
+                                    lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
+                                    axis=1
+                                )
                                 st.session_state.uid_changes = {}
                             else:
                                 st.error(f"UID matching failed: {e}")
@@ -511,7 +523,10 @@ if option == "SurveyMonkey":
                         display_df = st.session_state.df_target[st.session_state.df_target["is_choice"] == False] if show_main_only else st.session_state.df_target
                         
                         display_df = display_df.copy()
-                        display_df["survey_id_title"] = display_df.apply(lambda x: f"{x['survey_id']} - {x['survey_title']}", axis=1)
+                        display_df["survey_id_title"] = display_df.apply(
+                            lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
+                            axis=1
+                        )
                         
                         edited_df = st.data_editor(
                             display_df,
@@ -532,9 +547,11 @@ if option == "SurveyMonkey":
                                 "is_choice": st.column_config.CheckboxColumn("Is Choice"),
                                 "parent_question": st.column_config.TextColumn("Parent Question"),
                                 "schema_type": st.column_config.TextColumn("Schema Type"),
-                                "question_uid": st.column_config.TextColumn("Question UID")
+                                "question_uid": st.column_config.TextColumn("Question UID"),
+                                "survey_id": st.column_config.TextColumn("Survey ID"),
+                                "survey_title": st.column_config.TextColumn("Survey Title")
                             },
-                            disabled=["survey_id_title", "heading_0", "position", "is_choice", "parent_question", "schema_type", "question_uid", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
+                            disabled=["survey_id_title", "heading_0", "position", "is_choice", "parent_question", "schema_type", "question_uid", "survey_id", "survey_title", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
                             hide_index=True
                         )
                         
@@ -580,7 +597,14 @@ if option == "SurveyMonkey":
                     selected_question = st.selectbox("Select a question/choice", filtered_questions, index=0)
                     
                     result_df = st.session_state.df_final.copy()
-                    result_df["survey_id_title"] = result_df.apply(lambda x: f"{x['survey_id']} - {x['survey_title']}", axis=1)
+                    # Ensure survey_id_title is added
+                    if "survey_id" in result_df.columns and "survey_title" in result_df.columns:
+                        result_df["survey_id_title"] = result_df.apply(
+                            lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
+                            axis=1
+                        )
+                    else:
+                        result_df["survey_id_title"] = ""
                     
                     if selected_question:
                         result_df = result_df[result_df["heading_0"] == selected_question]
@@ -597,6 +621,8 @@ if option == "SurveyMonkey":
                         st.warning("UID options unavailable due to Snowflake issues. Fix connection to load UIDs.")
                     
                     result_columns = ["survey_id_title", "heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
+                    # Filter columns that exist
+                    result_columns = [col for col in result_columns if col in result_df.columns]
                     display_df = result_df[result_columns].copy()
                     display_df = display_df.rename(columns={"heading_0": "Question/Choice", "Final_UID": "final_UID"})
                     
@@ -694,9 +720,16 @@ if option == "SurveyMonkey":
                     
                     st.subheader("Configured Survey")
                     config_columns = [
-                        "survey_id_title", "heading_0", "position", "is_choice", "parent_question", 
+                        "heading_0", "position", "is_choice", "parent_question", 
                         "schema_type", "mandatory", "mandatory_editable", "configured_final_UID"
                     ]
+                    if "survey_id" in st.session_state.df_final.columns and "survey_title" in st.session_state.df_final.columns:
+                        config_columns.insert(0, "survey_id_title")
+                        st.session_state.df_final["survey_id_title"] = st.session_state.df_final.apply(
+                            lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
+                            axis=1
+                        )
+                    
                     config_df = st.session_state.df_final[config_columns].copy()
                     config_df = config_df[config_df["is_choice"] == False] if show_main_only else config_df
                     config_df = config_df.rename(columns={"heading_0": "Question/Choice"})
@@ -709,6 +742,7 @@ if option == "SurveyMonkey":
                         "is_choice", "parent_question", "question_uid", "schema_type", "mandatory",
                         "mandatory_editable"
                     ]
+                    export_columns = [col for col in export_columns if col in st.session_state.df_final.columns]
                     export_df = st.session_state.df_final[export_columns].copy()
                     export_df = export_df.rename(columns={"configured_final_UID": "uid"})
                     
