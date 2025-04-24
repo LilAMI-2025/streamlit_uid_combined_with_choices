@@ -25,8 +25,8 @@ SEMANTIC_THRESHOLD = 0.60
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000
 CACHE_FILE = "survey_cache.json"
-REQUEST_DELAY = 0.5  # Delay between API calls in seconds
-MAX_SURVEYS_PER_BATCH = 10  # Number of surveys to fetch per batch
+REQUEST_DELAY = 0.5
+MAX_SURVEYS_PER_BATCH = 10
 
 # Synonym Mapping
 DEFAULT_SYNONYM_MAP = {
@@ -64,8 +64,7 @@ def get_snowflake_engine():
         if "250001" in str(e):
             st.warning(
                 "Snowflake connection failed: User account is locked. "
-                "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
+                "UID matching is disabled, but you can edit questions, search, and use Google Forms."
             )
         raise
 
@@ -82,7 +81,7 @@ def load_cached_survey_data():
             with open(CACHE_FILE, "r") as f:
                 cache = json.load(f)
             cache_time = cache.get("timestamp", 0)
-            if time.time() - cache_time < 24 * 3600:  # Cache valid for 24 hours
+            if time.time() - cache_time < 24 * 3600:
                 return (
                     pd.DataFrame(cache.get("all_questions", [])),
                     cache.get("dedup_questions", []),
@@ -156,33 +155,7 @@ def run_snowflake_reference_query(limit=10000, offset=0):
         logger.error(f"Snowflake reference query failed: {e}")
         if "250001" in str(e):
             st.warning(
-                "Cannot fetch Snowflake data: User account is locked. "
-                "UID matching is disabled. Please resolve the lockout and retry."
-            )
-        elif "invalid identifier" in str(e).lower():
-            st.warning(
-                "Snowflake query failed due to invalid column. "
-                "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                "Contact your Snowflake admin to verify table schema."
-            )
-        raise
-
-def run_snowflake_target_query():
-    query = """
-        SELECT DISTINCT HEADING_0
-        FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
-        WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
-    """
-    try:
-        with get_snowflake_engine().connect() as conn:
-            result = pd.read_sql(text(query), conn)
-        return result
-    except Exception as e:
-        logger.error(f"Snowflake target query failed: {e}")
-        if "250001" in str(e):
-            st.warning(
-                "Cannot fetch Snowflake data: User account is locked. "
-                "Please resolve the lockout and retry."
+                "Cannot fetch Snowflake data: User account is locked."
             )
         raise
 
@@ -224,7 +197,7 @@ def create_survey(token, survey_template):
     try:
         response = requests.post(url, headers=headers, json={
             "title": survey_template["title"],
-            "nickname": survey_template.get("nickname", survey_template["title"]),
+            "nickname": survey_template["nickname"],
             "language": survey_template.get("language", "en")
         })
         response.raise_for_status()
@@ -300,7 +273,7 @@ def extract_questions(survey_json):
             if q_text:
                 global_position += 1
                 questions.append({
-                    "heading_0": q_text,
+                    "heading_0": q_text,  # From SurveyMonkey question text
                     "position": global_position,
                     "is_choice": False,
                     "parent_question": None,
@@ -316,7 +289,7 @@ def extract_questions(survey_json):
                     choice_text = choice.get("text", "")
                     if choice_text:
                         questions.append({
-                            "heading_0": f"{q_text} - {choice_text}",
+                            "heading_0": f"{q_text} - {choice_text}",  # From SurveyMonkey question and choice text
                             "position": global_position,
                             "is_choice": True,
                             "parent_question": q_text,
@@ -408,12 +381,6 @@ def finalize_matches(df_target, df_reference):
         lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
     )
     
-    if "survey_id" in df_target.columns and "survey_title" in df_target.columns:
-        df_target["survey_id_title"] = df_target.apply(
-            lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
-            axis=1
-        )
-    
     return df_target
 
 def detect_uid_conflicts(df_target):
@@ -475,6 +442,8 @@ if "survey_template" not in st.session_state:
     st.session_state.survey_template = None
 if "preview_template" not in st.session_state:
     st.session_state.preview_template = None
+if "preview_df" not in st.session_state:
+    st.session_state.preview_df = None
 if "all_questions" not in st.session_state:
     st.session_state.all_questions = None
 if "dedup_questions" not in st.session_state:
@@ -564,40 +533,24 @@ if option == "SurveyMonkey":
                             st.session_state.uid_changes = {}
                     except Exception as e:
                         logger.error(f"UID matching failed: {e}")
-                        if "250001" in str(e) or "invalid identifier" in str(e).lower():
-                            st.warning(
-                                "Snowflake connection failed: Account may be locked or table schema is incorrect. "
-                                "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                                "Contact your Snowflake admin to resolve lockout or verify table schema."
-                            )
-                            st.session_state.df_reference = None
-                            st.session_state.df_final = st.session_state.df_target.copy()
-                            st.session_state.df_final["Final_UID"] = None
-                            st.session_state.df_final["configured_final_UID"] = None
-                            st.session_state.df_final["Change_UID"] = None
-                            st.session_state.df_final["survey_id_title"] = st.session_state.df_final.apply(
-                                lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
-                                axis=1
-                            )
-                            st.session_state.uid_changes = {}
-                        else:
-                            st.error(f"UID matching failed: {e}")
-                            raise
+                        st.warning(
+                            "Snowflake connection failed. UID matching is disabled."
+                        )
+                        st.session_state.df_reference = None
+                        st.session_state.df_final = st.session_state.df_target.copy()
+                        st.session_state.df_final["Final_UID"] = None
+                        st.session_state.df_final["configured_final_UID"] = None
+                        st.session_state.df_final["Change_UID"] = None
+                        st.session_state.uid_changes = {}
                     
                     st.write("Edit mandatory status for questions/choices. Go to next tab for UID matching.")
                     show_main_only = st.checkbox("Show only main questions", value=False)
                     display_df = st.session_state.df_target[st.session_state.df_target["is_choice"] == False] if show_main_only else st.session_state.df_target
                     
-                    display_df = display_df.copy()
-                    display_df["survey_id_title"] = display_df.apply(
-                        lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
-                        axis=1
-                    )
-                    
                     edited_df = st.data_editor(
                         display_df,
                         column_config={
-                            "survey_id_title": st.column_config.TextColumn("Survey ID/Title"),
+                            "heading_0": st.column_config.TextColumn("Question/Choice"),
                             "mandatory": st.column_config.CheckboxColumn(
                                 "Mandatory",
                                 help="Mark question as mandatory",
@@ -608,7 +561,6 @@ if option == "SurveyMonkey":
                                 help="Can mandatory status be edited?",
                                 disabled=True
                             ),
-                            "heading_0": st.column_config.TextColumn("Question/Choice"),
                             "position": st.column_config.NumberColumn("Position"),
                             "is_choice": st.column_config.CheckboxColumn("Is Choice"),
                             "parent_question": st.column_config.TextColumn("Parent Question"),
@@ -617,7 +569,7 @@ if option == "SurveyMonkey":
                             "survey_id": st.column_config.TextColumn("Survey ID"),
                             "survey_title": st.column_config.TextColumn("Survey Title")
                         },
-                        disabled=["survey_id_title", "heading_0", "position", "is_choice", "parent_question", "schema_type", "question_uid", "survey_id", "survey_title", "mandatory_editable"] + (["mandatory"] if not display_df["mandatory_editable"].any() else []),
+                        disabled=["heading_0", "position", "is_choice", "parent_question", "schema_type", "question_uid", "survey_id", "survey_title", "mandatory_editable"],
                         hide_index=True
                     )
                     
@@ -634,21 +586,7 @@ if option == "SurveyMonkey":
                 matched_percentage = calculate_matched_percentage(st.session_state.df_final)
                 st.metric("Matched Questions", f"{matched_percentage}%")
                 
-                if matched_percentage == 0.0:
-                    eligible_count = len(st.session_state.df_final[
-                        (st.session_state.df_final["is_choice"] == False) &
-                        (~st.session_state.df_final["heading_0"].str.contains("Our Privacy Policy", case=False, na=False)) &
-                        (~st.session_state.df_final["heading_0"].str.contains(
-                            r"<div.*text-align:\s*center.*<span.*font-size:\s*12pt.*<em>If you have any questions, please contact your AMI Learner Success Manager.*</em>.*</span>.*</div>",
-                            case=False, na=False, regex=True))
-                    ])
-                    if eligible_count == 0:
-                        st.warning("No eligible questions found (all may be excluded due to 'Our Privacy Policy' or specific HTML format).")
-                
                 st.subheader("UID Matching for Questions/Choices")
-                if st.session_state.df_final["Final_UID"].isna().all():
-                    st.info("UID matching disabled due to Snowflake issues. Assign UIDs manually or fix the connection.")
-                
                 show_main_only = st.checkbox("Show only main questions", value=False, key="tab2_main_only")
                 match_filter = st.selectbox(
                     "Filter by Match Status",
@@ -663,14 +601,6 @@ if option == "SurveyMonkey":
                 selected_question = st.selectbox("Select a question/choice", filtered_questions, index=0)
                 
                 result_df = st.session_state.df_final.copy()
-                if "survey_id" in result_df.columns and "survey_title" in result_df.columns:
-                    result_df["survey_id_title"] = result_df.apply(
-                        lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
-                        axis=1
-                    )
-                else:
-                    result_df["survey_id_title"] = ""
-                
                 if selected_question:
                     result_df = result_df[result_df["heading_0"] == selected_question]
                 if match_filter == "Matched":
@@ -682,10 +612,8 @@ if option == "SurveyMonkey":
                 uid_options = [None]
                 if st.session_state.df_reference is not None:
                     uid_options += [f"{row['uid']} - {row['heading_0']}" for _, row in st.session_state.df_reference.iterrows()]
-                else:
-                    st.warning("UID options unavailable due to Snowflake issues. Fix connection to load UIDs.")
                 
-                result_columns = ["survey_id_title", "heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
+                result_columns = ["heading_0", "position", "is_choice", "Final_UID", "question_uid", "schema_type", "Change_UID"]
                 result_columns = [col for col in result_columns if col in result_df.columns]
                 display_df = result_df[result_columns].copy()
                 display_df = display_df.rename(columns={"heading_0": "Question/Choice", "Final_UID": "final_UID"})
@@ -693,7 +621,6 @@ if option == "SurveyMonkey":
                 edited_df = st.data_editor(
                     display_df,
                     column_config={
-                        "survey_id_title": st.column_config.TextColumn("Survey ID/Title"),
                         "Question/Choice": st.column_config.TextColumn("Question/Choice"),
                         "position": st.column_config.NumberColumn("Position"),
                         "is_choice": st.column_config.CheckboxColumn("Is Choice"),
@@ -707,7 +634,7 @@ if option == "SurveyMonkey":
                             default=None
                         )
                     },
-                    disabled=["survey_id_title", "Question/Choice", "position", "is_choice", "final_UID", "question_uid", "schema_type"],
+                    disabled=["Question/Choice", "position", "is_choice", "final_UID", "question_uid", "schema_type"],
                     hide_index=True
                 )
                 
@@ -721,11 +648,9 @@ if option == "SurveyMonkey":
                         st.session_state.uid_changes[idx] = new_uid
                 
                 st.subheader("Create New Questions")
-                st.write("Submit new questions via Google Form. Fields: Question Text, Type, Choices, Program, Mandatory.")
                 st.markdown("[Submit New Question](https://docs.google.com/forms/d/1LoY_La59UJ4ZsuxckM8Wl52kVeLI7a1t1MF8zIQxGUs)")
                 
                 st.subheader("Create New UID")
-                st.write("Submit new UIDs via Google Form. Fields: Question Text, Proposed UID, Program, Type, Mandatory.")
                 st.markdown("[Submit New UID](https://docs.google.com/forms/d/1lkhfm1-t5-zwLxfbVEUiHewveLpGXv5yEVRlQx5XjxA)")
                 
                 st.subheader("Customize Questions/Choices")
@@ -787,13 +712,6 @@ if option == "SurveyMonkey":
                     "heading_0", "position", "is_choice", "parent_question", 
                     "schema_type", "mandatory", "mandatory_editable", "configured_final_UID"
                 ]
-                if "survey_id" in st.session_state.df_final.columns and "survey_title" in st.session_state.df_final.columns:
-                    config_columns.insert(0, "survey_id_title")
-                    st.session_state.df_final["survey_id_title"] = st.session_state.df_final.apply(
-                        lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
-                        axis=1
-                    )
-                
                 config_df = st.session_state.df_final[config_columns].copy()
                 config_df = config_df[config_df["is_choice"] == False] if show_main_only else config_df
                 config_df = config_df.rename(columns={"heading_0": "Question/Choice"})
@@ -830,10 +748,7 @@ if option == "SurveyMonkey":
                         st.success("Successfully uploaded to Snowflake!")
                     except Exception as e:
                         logger.error(f"Snowflake upload failed: {e}")
-                        if "250001" in str(e):
-                            st.error("Snowflake upload failed: User account is locked. Contact your Snowflake admin.")
-                        else:
-                            st.error(f"Snowflake upload failed: {e}")
+                        st.error(f"Snowflake upload failed: {e}")
             else:
                 st.write("Select a survey to view the configured survey.")
 
@@ -841,7 +756,6 @@ if option == "SurveyMonkey":
         with tab4:
             st.subheader("Create New Survey")
             
-            # Refresh survey data
             if st.button("🔄 Refresh Survey Data"):
                 st.session_state.all_questions = None
                 st.session_state.dedup_questions = []
@@ -851,7 +765,6 @@ if option == "SurveyMonkey":
                     os.remove(CACHE_FILE)
                 st.experimental_rerun()
             
-            # Load more surveys for deduplicated lists
             if st.session_state.all_questions is None or len(st.session_state.fetched_survey_ids) < len(surveys):
                 remaining_surveys = [s for s in surveys if s["id"] not in st.session_state.fetched_survey_ids]
                 if remaining_surveys and st.button(f"📥 Load More Surveys ({len(remaining_surveys)} remaining)"):
@@ -880,21 +793,16 @@ if option == "SurveyMonkey":
                         )
                         st.success(f"Loaded {len(batch_surveys)} surveys. {len(remaining_surveys) - len(batch_surveys)} remaining.")
                     except requests.HTTPError as e:
-                        if "429" in str(e):
-                            st.error("Rate limit exceeded. Please wait a few minutes and try again or refresh later.")
-                        else:
-                            st.error(f"Failed to fetch surveys: {e}")
+                        st.error(f"Failed to fetch surveys: {e}")
                     except Exception as e:
                         st.error(f"Failed to fetch surveys: {e}")
             
-            # Buttons for creation modes
             col1, col2 = st.columns(2)
             with col1:
                 from_pre_existing = st.button("📋 From Pre-existing Survey")
             with col2:
                 create_new_template = st.button("✨ Create New Template")
             
-            # From Pre-existing Survey
             if from_pre_existing or st.session_state.mode == "pre_existing":
                 st.session_state.mode = "pre_existing"
                 st.write("### Create Survey from Pre-existing Surveys")
@@ -913,17 +821,13 @@ if option == "SurveyMonkey":
                     ].copy() if selected_survey_ids and st.session_state.all_questions is not None else pd.DataFrame()
                     
                     if not selected_questions.empty:
-                        selected_questions["survey_id_title"] = selected_questions.apply(
-                            lambda x: f"{x['survey_id']} - {x['survey_title']}", axis=1
-                        )
-                        edit_df = selected_questions[["survey_id_title", "heading_0", "schema_type", "is_choice"]].copy()
+                        edit_df = selected_questions[["heading_0", "schema_type", "is_choice"]].copy()
                         edit_df["required"] = False
                         
                         st.write("#### Selected Questions")
                         edited_df = st.data_editor(
                             edit_df,
                             column_config={
-                                "survey_id_title": st.column_config.TextColumn("Survey ID/Title"),
                                 "heading_0": st.column_config.TextColumn("Question/Choice"),
                                 "schema_type": st.column_config.SelectboxColumn(
                                     "Question Type",
@@ -939,7 +843,6 @@ if option == "SurveyMonkey":
                         
                         if st.button("➕ Add Question"):
                             new_row = pd.DataFrame({
-                                "survey_id_title": [""],
                                 "heading_0": [""],
                                 "schema_type": ["Open-Ended"],
                                 "is_choice": [False],
@@ -961,7 +864,6 @@ if option == "SurveyMonkey":
                         )
                         if new_question:
                             new_row = pd.DataFrame({
-                                "survey_id_title": [""],
                                 "heading_0": [new_question],
                                 "schema_type": ["Open-Ended"],
                                 "is_choice": [False],
@@ -983,7 +885,6 @@ if option == "SurveyMonkey":
                                 )
                                 if new_choice:
                                     new_row = pd.DataFrame({
-                                        "survey_id_title": [row["survey_id_title"]],
                                         "heading_0": [f"{row['heading_0']} - {new_choice}"],
                                         "schema_type": [row["schema_type"]],
                                         "is_choice": [True],
@@ -994,22 +895,21 @@ if option == "SurveyMonkey":
                                     st.experimental_rerun()
                     
                     survey_title = st.text_input("Survey Title", value="New Survey from Pre-existing")
+                    survey_nickname = st.text_input("Survey Nickname", value=survey_title)
                     survey_language = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
                     
-                    # Add Preview and Create Survey buttons
                     col_preview, col_create = st.columns(2)
                     with col_preview:
                         preview = st.form_submit_button("👁️ Preview")
                     with col_create:
                         submit = st.form_submit_button("Create Survey")
                     
-                    # Process Preview or Create Survey
                     if preview or submit:
                         if not survey_title or edited_df.empty:
                             st.error("Survey title and at least one question are required.")
                         else:
-                            # Generate survey template
                             questions = []
+                            preview_rows = []
                             position = 1
                             for idx, row in edited_df.iterrows():
                                 question_template = {
@@ -1042,9 +942,20 @@ if option == "SurveyMonkey":
                                 else:
                                     questions.append(question_template)
                                     position += 1
+                                
+                                preview_rows.append({
+                                    "position": question_template["position"],
+                                    "title": survey_title,
+                                    "nickname": survey_nickname,
+                                    "heading_0": row["heading_0"],
+                                    "schema_type": row["schema_type"],
+                                    "is_choice": row["is_choice"],
+                                    "required": row["required"]
+                                })
                             
                             survey_template = {
                                 "title": survey_title,
+                                "nickname": survey_nickname,
                                 "language": survey_language,
                                 "pages": [{
                                     "title": "Page 1",
@@ -1064,15 +975,148 @@ if option == "SurveyMonkey":
                                 }
                             }
                             
+                            preview_df = pd.DataFrame(preview_rows)
+                            
+                            if st.session_state.df_reference is not None:
+                                try:
+                                    uid_target = preview_df[preview_df["is_choice"] == False][["heading_0"]].copy()
+                                    if not uid_target.empty:
+                                        uid_matched = run_uid_match(st.session_state.df_reference, uid_target)
+                                        preview_df = preview_df.merge(
+                                            uid_matched[["heading_0", "Final_UID"]],
+                                            on="heading_0",
+                                            how="left"
+                                        )
+                                except Exception as e:
+                                    logger.error(f"UID matching for preview failed: {e}")
+                                    st.warning("UID matching failed. UIDs will not be assigned in preview.")
+                                    preview_df["Final_UID"] = None
+                            else:
+                                preview_df["Final_UID"] = None
+                            
+                            st.session_state.preview_template = survey_template
+                            st.session_state.preview_df = preview_df
+                            
                             if preview:
-                                # Store and display preview
-                                st.session_state.preview_template = survey_template
                                 st.success("Preview generated successfully!")
                                 st.subheader("Survey Preview")
                                 st.json(st.session_state.preview_template)
+                                
+                                st.subheader("Edit Survey Questions")
+                                def highlight_duplicates(df):
+                                    styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                                    main_questions = df[df["is_choice"] == False]["heading_0"]
+                                    duplicates = main_questions[main_questions.duplicated(keep=False)]
+                                    if not duplicates.empty:
+                                        mask = (df["is_choice"] == False) & (df["heading_0"].isin(duplicates))
+                                        styles.loc[mask, "heading_0"] = 'background-color: red'
+                                    return styles
+                                
+                                question_options = [""] + st.session_state.dedup_questions
+                                choice_options = [""] + st.session_state.dedup_choices
+                                edited_preview_df = st.data_editor(
+                                    preview_df,
+                                    column_config={
+                                        "position": st.column_config.NumberColumn("Position"),
+                                        "title": st.column_config.TextColumn("Survey Title"),
+                                        "nickname": st.column_config.TextColumn("Survey Nickname"),
+                                        "heading_0": st.column_config.SelectboxColumn(
+                                            "Question/Choice",
+                                            options=question_options if not preview_df["is_choice"].iloc[-1] else choice_options,
+                                            default=""
+                                        ),
+                                        "schema_type": st.column_config.SelectboxColumn(
+                                            "Question Type",
+                                            options=["Single Choice", "Multiple Choice", "Open-Ended", "Matrix"],
+                                            default="Open-Ended"
+                                        ),
+                                        "is_choice": st.column_config.CheckboxColumn("Is Choice"),
+                                        "required": st.column_config.CheckboxColumn("Required"),
+                                        "Final_UID": st.column_config.TextColumn("Matched UID")
+                                    },
+                                    hide_index=True,
+                                    num_rows="dynamic"
+                                )
+                                
+                                if not edited_preview_df.equals(preview_df):
+                                    questions = []
+                                    position = 1
+                                    for idx, row in edited_preview_df.iterrows():
+                                        question_template = {
+                                            "heading": row["heading_0"].split(" - ")[0] if row["is_choice"] else row["heading_0"],
+                                            "position": position,
+                                            "is_required": row["required"]
+                                        }
+                                        if row["schema_type"] == "Single Choice":
+                                            question_template["family"] = "single_choice"
+                                            question_template["subtype"] = "vertical"
+                                        elif row["schema_type"] == "Multiple Choice":
+                                            question_template["family"] = "multiple_choice"
+                                            question_template["subtype"] = "vertical"
+                                        elif row["schema_type"] == "Open-Ended":
+                                            question_template["family"] = "open_ended"
+                                            question_template["subtype"] = "essay"
+                                        elif row["schema_type"] == "Matrix":
+                                            question_template["family"] = "matrix"
+                                            question_template["subtype"] = "rating"
+                                        
+                                        if row["is_choice"]:
+                                            parent_question = row["heading_0"].split(" - ")[0]
+                                            parent_idx = edited_preview_df[edited_preview_df["heading_0"] == parent_question].index
+                                            if parent_idx.empty:
+                                                continue
+                                            parent_idx = parent_idx[0]
+                                            if "choices" not in questions[parent_idx]:
+                                                questions[parent_idx]["choices"] = []
+                                            questions[parent_idx]["choices"].append({
+                                                "text": row["heading_0"].split(" - ")[1],
+                                                "position": len(questions[parent_idx]["choices"]) + 1
+                                            })
+                                        else:
+                                            questions.append(question_template)
+                                            position += 1
+                                    
+                                    survey_template = {
+                                        "title": edited_preview_df["title"].iloc[0],
+                                        "nickname": edited_preview_df["nickname"].iloc[0],
+                                        "language": survey_language,
+                                        "pages": [{
+                                            "title": "Page 1",
+                                            "description": "",
+                                            "questions": questions
+                                        }],
+                                        "settings": {
+                                            "progress_bar": False,
+                                            "hide_asterisks": True,
+                                            "one_question_at_a_time": False
+                                        },
+                                        "theme": {
+                                            "font": "Arial",
+                                            "background_color": "#FFFFFF",
+                                            "question_color": "#000000",
+                                            "answer_color": "#000000"
+                                        }
+                                    }
+                                    st.session_state.preview_template = survey_template
+                                    st.session_state.preview_df = edited_preview_df
+                                    st.json(st.session_state.preview_template)
+                                
+                                if st.button("➕ Add Question/Choice"):
+                                    new_position = preview_df["position"].max() + 1 if not preview_df.empty else 1
+                                    new_row = pd.DataFrame({
+                                        "position": [new_position],
+                                        "title": [survey_title],
+                                        "nickname": [survey_nickname],
+                                        "heading_0": [""],
+                                        "schema_type": ["Open-Ended"],
+                                        "is_choice": [False],
+                                        "required": [False],
+                                        "Final_UID": [None]
+                                    })
+                                    st.session_state.preview_df = pd.concat([preview_df, new_row], ignore_index=True)
+                                    st.experimental_rerun()
                             
                             if submit:
-                                # Use previewed template if available, else use newly generated
                                 template_to_use = st.session_state.preview_template if st.session_state.preview_template else survey_template
                                 try:
                                     with st.spinner("Creating survey in SurveyMonkey..."):
@@ -1083,6 +1127,10 @@ if option == "SurveyMonkey":
                                                 create_question(token, survey_id, page_id, question_template)
                                         st.success(f"Survey created successfully! Survey ID: {survey_id}")
                                         st.session_state.survey_template = template_to_use
+                                        if st.session_state.preview_df is not None:
+                                            st.session_state.df_final = st.session_state.preview_df.copy()
+                                            st.session_state.df_final["survey_id"] = survey_id
+                                            st.session_state.df_final["survey_title"] = survey_title
                                 except Exception as e:
                                     st.error(f"Failed to create survey: {e}")
                 
@@ -1090,13 +1138,13 @@ if option == "SurveyMonkey":
                     st.subheader("Created Survey Template")
                     st.json(st.session_state.survey_template)
             
-            # Create New Template
             if create_new_template or st.session_state.mode == "new_template":
                 st.session_state.mode = "new_template"
                 st.write("### Create New Survey Template")
                 
                 with st.form("new_template_form"):
                     survey_title = st.text_input("Survey Title", value="New Survey")
+                    survey_nickname = st.text_input("Survey Nickname", value=survey_title)
                     survey_language = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
                     
                     num_pages = st.number_input("Number of Pages", min_value=1, max_value=10, value=1)
@@ -1246,6 +1294,7 @@ if option == "SurveyMonkey":
                     
                     survey_template = {
                         "title": survey_title,
+                        "nickname": survey_nickname,
                         "language": survey_language,
                         "pages": pages,
                         "settings": {
@@ -1313,10 +1362,4 @@ if option == "Snowflake":
                 )
         except Exception as e:
             logger.error(f"Snowflake processing failed: {e}")
-            if "250001" in str(e):
-                st.error(
-                    "Snowflake connection failed: User account is locked. "
-                    "Contact your Snowflake admin or wait 15–30 minutes."
-                )
-            else:
-                st.error(f"Error: {e}")
+            st.error(f"Error: {e}")
