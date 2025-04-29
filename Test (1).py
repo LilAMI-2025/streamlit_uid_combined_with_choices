@@ -14,12 +14,13 @@ try:
     from sklearn.metrics.pairwise import cosine_similarity
     from sentence_transformers import SentenceTransformer, util
     from rapidfuzz import fuzz
+    import snowflake.sqlalchemy  # Explicit import for Snowflake dialect
 except ImportError as e:
     missing_package = str(e).split("No module named ")[-1].replace("'", "")
     raise ImportError(f"""
 Missing required package: {missing_package}
 Please install it using:
-pip install pandas openpyxl rapidfuzz python-Levenshtein SQLAlchemy scikit-learn sentence-transformers streamlit requests
+pip install pandas openpyxl rapidfuzz python-Levenshtein SQLAlchemy scikit-learn sentence-transformers streamlit requests snowflake-sqlalchemy snowflake-connector-python
 """)
 
 # --- Setup Logging ---
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # --- Streamlit Configuration ---
 st.set_page_config(page_title="UID Matcher App", layout="wide")
 
-# --- Constants (Added from Previous Script) ---
+# --- Constants ---
 TFIDF_HIGH_CONFIDENCE = 0.60
 TFIDF_LOW_CONFIDENCE = 0.50
 SEMANTIC_THRESHOLD = 0.60
@@ -37,7 +38,7 @@ FUZZY_THRESHOLD = 0.95
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000
 
-# --- Synonym Mapping (Added from Previous Script) ---
+# --- Synonym Mapping ---
 DEFAULT_SYNONYM_MAP = {
     "please select": "what is",
     "sector you are from": "your sector",
@@ -46,7 +47,7 @@ DEFAULT_SYNONYM_MAP = {
     "are you": "do you",
 }
 
-# --- Excluded Questions List (Added from Previous Script) ---
+# --- Excluded Questions List ---
 questions_to_exclude = [
     "As we prepare to implement our programme in your company, we would like to define what learning interventions are needed to help you achieve your strategic objectives. Clearly establishing these parameters now will help to inform and support the embedding of a culture of learning and personal development from your leaders all the way through to your non-management staff.",
     "Please provide the following details:",
@@ -122,6 +123,15 @@ def load_sentence_transformer():
 @st.cache_resource
 def get_snowflake_engine():
     try:
+        import snowflake.sqlalchemy
+        import sqlalchemy
+        logger.info(f"SQLAlchemy version: {sqlalchemy.__version__}")
+        logger.info(f"Snowflake-SQLAlchemy version: {snowflake.sqlalchemy.__version__}")
+    except ImportError:
+        st.error("Snowflake SQLAlchemy dialect not found. Install it using: pip install snowflake-sqlalchemy")
+        raise ImportError("Missing snowflake-sqlalchemy package")
+    
+    try:
         sf = st.secrets["snowflake"]
         logger.info(f"Attempting Snowflake connection: user={sf.user}, account={sf.account}")
         engine = create_engine(
@@ -135,6 +145,8 @@ def get_snowflake_engine():
         logger.error(f"Snowflake engine creation failed: {e}")
         if "250001" in str(e):
             st.error("Snowflake connection failed: User account is locked. Contact your Snowflake admin.")
+        elif "Can't load plugin: sqlalchemy.dialects:snowflake" in str(e):
+            st.error("Snowflake SQLAlchemy dialect failed to load. Ensure snowflake-sqlalchemy is installed.")
         raise
 
 @st.cache_data
@@ -406,6 +418,8 @@ elif page == "UID Matching":
                 logger.error(f"Snowflake processing failed: {e}")
                 if "250001" in str(e):
                     st.error("Snowflake processing failed: User account is locked. Contact your Snowflake admin to resolve.")
+                elif "Can't load plugin: sqlalchemy.dialects:snowflake" in str(e):
+                    st.error("Snowflake processing failed: Snowflake SQLAlchemy dialect not found. Install snowflake-sqlalchemy.")
                 else:
                     st.error(f"Snowflake processing failed: {e}")
 
