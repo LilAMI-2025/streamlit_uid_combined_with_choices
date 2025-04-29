@@ -1,4 +1,4 @@
-### --- Full Final Streamlit UID Matcher Script (Improved and Complete) --- ###
+### --- Full Final Streamlit UID Matcher Script (Improved, Complete, and Enhanced UX) --- ###
 
 # --- Install and Import Required Libraries ---
 try:
@@ -46,7 +46,7 @@ elif page == "UID Matching":
                 df_target = compute_semantic_matches(df_reference, df_target)
 
                 st.success("UID Matching Completed!")
-                st.dataframe(df_target)
+                st.dataframe(df_target.style.applymap(lambda val: 'background-color: lightgreen' if val == '✅ High' else 'background-color: orange' if val == '⚠️ Low' else ''))
 
                 st.download_button(
                     "Download Results as CSV",
@@ -58,58 +58,9 @@ elif page == "UID Matching":
             except Exception as e:
                 st.error(f"Error: {e}")
 
-# --- SurveyMonkey Fetch Workflow ---
+# --- SurveyMonkey Fetch Workflow with UID Matching and Color Coding ---
 elif page == "SurveyMonkey Fetch":
-    st.title("SurveyMonkey Integration")
-
-    token = st.secrets.get("surveymonkey", {}).get("token", None)
-    if not token:
-        st.error("SurveyMonkey token missing in secrets.")
-        st.stop()
-
-    def get_surveys(token):
-        url = "https://api.surveymonkey.com/v3/surveys"
-        headers = {"Authorization": f"Bearer {token}"}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json().get("data", [])
-
-    def get_survey_details(survey_id, token):
-        url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/details"
-        headers = {"Authorization": f"Bearer {token}"}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-
-    with st.spinner("Fetching available surveys..."):
-        surveys = get_surveys(token)
-
-    survey_dict = {s['title']: s['id'] for s in surveys}
-
-    selected_title = st.selectbox("Choose Survey", list(survey_dict.keys()))
-    selected_id = survey_dict[selected_title]
-
-    if st.button("Fetch Survey Details"):
-        with st.spinner("Fetching Survey Details..."):
-            survey_json = get_survey_details(selected_id, token)
-            questions = []
-            for page in survey_json.get("pages", []):
-                for question in page.get("questions", []):
-                    questions.append(question.get("headings", [{}])[0].get("heading", ""))
-
-            df_questions = pd.DataFrame({"Question": questions})
-            st.dataframe(df_questions)
-
-            st.download_button(
-                "Download Questions as CSV",
-                df_questions.to_csv(index=False).encode('utf-8'),
-                "survey_questions.csv",
-                "text/csv"
-            )
-
-# --- SurveyMonkey Fetch Workflow (Updated) ---
-elif page == "SurveyMonkey Fetch":
-    st.title("SurveyMonkey Fetch + UID Matching")
+    st.title("SurveyMonkey Integration + UID Matching")
 
     token = st.secrets.get("surveymonkey", {}).get("token", None)
     if not token:
@@ -142,7 +93,6 @@ elif page == "SurveyMonkey Fetch":
         try:
             with st.spinner("Fetching Survey Details..."):
                 survey_json = get_survey_details(selected_id, token)
-
                 questions_list = []
                 for page in survey_json.get("pages", []):
                     for question in page.get("questions", []):
@@ -166,15 +116,13 @@ elif page == "SurveyMonkey Fetch":
 
                 df_target = pd.DataFrame(questions_list)
 
-            # --- Now Run UID Matching ---
             with st.spinner("Running UID Matching..."):
                 df_reference = run_snowflake_reference_query()
-
                 df_target = compute_tfidf_matches(df_reference, df_target)
                 df_target = compute_semantic_matches(df_reference, df_target)
 
             st.success("UID Matching Completed on SurveyMonkey Fetched Data!")
-            st.dataframe(df_target)
+            st.dataframe(df_target.style.applymap(lambda val: 'background-color: lightgreen' if val == '✅ High' else 'background-color: orange' if val == '⚠️ Low' else ''))
 
             st.download_button(
                 "Download UID Matched Survey as CSV",
@@ -186,5 +134,52 @@ elif page == "SurveyMonkey Fetch":
         except Exception as e:
             st.error(f"Failed: {e}")
 
+# --- Create New Survey Workflow ---
+elif page == "Create New Survey":
+    st.title("Create New Survey on SurveyMonkey")
 
-### --- End of Full Combined and Final Script --- ###
+    token = st.secrets.get("surveymonkey", {}).get("token", None)
+    if not token:
+        st.error("SurveyMonkey token missing in secrets.")
+        st.stop()
+
+    survey_title = st.text_input("Survey Title")
+    survey_nickname = st.text_input("Survey Nickname")
+    question_text = st.text_area("Enter Question Text")
+
+    if st.button("Create Survey"):
+        try:
+            url = "https://api.surveymonkey.com/v3/surveys"
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            payload = {
+                "title": survey_title,
+                "nickname": survey_nickname or survey_title,
+                "language": "en"
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            survey_id = response.json().get("id")
+
+            if survey_id and question_text:
+                page_url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/pages"
+                page_response = requests.post(page_url, headers=headers, json={"title": "Page 1"})
+                page_response.raise_for_status()
+                page_id = page_response.json().get("id")
+
+                question_url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/pages/{page_id}/questions"
+                question_payload = {
+                    "headings": [{"heading": question_text}],
+                    "family": "single_choice",
+                    "subtype": "vertical",
+                    "answers": {"choices": [{"text": "Option 1"}, {"text": "Option 2"}]}
+                }
+                question_response = requests.post(question_url, headers=headers, json=question_payload)
+                question_response.raise_for_status()
+
+                st.success(f"Survey created successfully! Survey ID: {survey_id}")
+
+        except Exception as e:
+            st.error(f"Failed to create survey: {e}")
+
+### --- End of Full Combined and UX Enhanced Final Script --- ###
