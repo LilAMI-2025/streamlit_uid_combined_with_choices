@@ -1,8 +1,4 @@
 
-# Install libraries (run once)
-!pip install pandas openpyxl fuzzywuzzy python-Levenshtein SQLAlchemy
-
-
 import streamlit as st
 import pandas as pd
 import requests
