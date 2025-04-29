@@ -345,6 +345,70 @@ def assign_match_type(row):
     return "🧠 Semantic" if pd.notnull(row["Semantic_UID"]) else "❌ No match"
 
 def finalize_matches(df_target, df_reference):
+    # List of questions to assign UID 9999
+    questions_to_exclude = [
+        "As we prepare to implement our programme in your company, we would like to define what learning interventions are needed to help you achieve your strategic objectives. Clearly establishing these parameters now will help to inform and support the embedding of a culture of learning and personal development from your leaders all the way through to your non-management staff.",
+        "Please provide the following details:",
+        "Now, we'd like to find out a little bit about your company's learning initiatives and how well aligned they are to your strategic objectives. A learning initiative is any formal or informal way in which your people are encouraged to learn. It may include online or face-to-face courses, coaching, projects, etc.",
+        "This section contains the heart of what we would like you to tell us. The following twenty Winning Behaviours represent what managers and staff do in any successful and growing organisation. Most or all of them would be important for your people too, but we are interested in identifying those few that stand out as supporting your unique strategic opportunities and challenges - those that would make a significant and obvious difference to your organisation’s performance. So we are asking you to rate their importance.\n\nYou will notice that we have not included specific technical or functional skills, like budgeting. This is, firstly, because it would make far too long a list for a busy leader like you to review; and secondly, because we assume that these functional skills are \"threshold behaviours” that every member has to have to be in their jobs, and so are likely to be equally present in your competitors. We would rather focus on the Winning Behaviours that will distinguish your company from others. Of course, if there are specific technical or functional skills that do or could provide you with a competitive advantage, you should certainly include those in your company's learning strategy.",
+        "Now, we want to delve a bit deeper to examine how the winning behaviours you have prioritised at the company-wide level might look different if you just focused on those employees who manage people. We will go through the same process of considering the importance, then frequency, and finally ranking of the Winning Behaviours for our learning initiative focus.",
+        "Now, we want to delve a bit deeper to examine how the winning behaviours you have prioritised at the company-wide and manager levels might look different if you just focused on those employees who do not manage any people. We will go through the same process of considering the importance, then frequency, and finally ranking of the Winning Behaviours for our learning initiative focus.",
+        "As a last step, we ask that you rank order the short list of those you have indicated are both important and less frequent for non-managers. In that way, you will tell us the priority behaviours you would like us to encourage your non-managers to demonstrate. You can either drag and drop the Winning behaviours into your chosen rank position, or you can adjust their numbering manually.",
+        "Thank you for taking the time to reflect on how aligned your learning initiatives are with your key strategic priorities. Once you submit, we will review your responses (alongside those of your CEO, people lead, senior managers) in order to advise on owner",
+        "BUSINESS DETAILS",
+        "LEARNING NEEDS",
+        "Confidentiality Assurance",
+        "The information provided in this assessment will be treated with the utmost confidentiality and will be used solely for the purpose of developing and improving our access to finance programs. Your institution's identity and specific details will not be disclosed or shared with third parties without prior consent.",
+        "Contact Information",
+        "Institutional Profile",
+        "Section II: Financial Products and Services",
+        "Section III: Credit Assessment and Risk Management",
+        "Introduction",
+        "Welcome to the Business Development Service Provider (BDSP) Diagnostic Tool, a crucial component in our mission to map and enhance the BDS landscape in Rwanda. This survey is designed to capture vital information about your organization's profile, services, target market, business model, and impact measurement practices. Your participation is essential in identifying gaps, challenges, and opportunities within the BDS ecosystem, and will directly inform the development of standards for high-quality, MSME-centric BDS provision.",
+        "Your participation in this 15-20 minute survey is invaluable in shaping the future of BDS in Rwanda. Your insights will contribute to improving support for MSMEs, enhancing collaboration among BDS providers, and influencing policy decisions to strengthen the sector. By participating, you'll have the opportunity to reflect on your organization's strengths and areas for growth, gain insights into industry trends, and have a voice in shaping BDS standards and policies. We appreciate your honest and thoughtful responses in this collective effort to foster sustainable enterprise development, growth, and resilience in Rwanda.",
+        "Confidentiality",
+        "1. Contact Information",
+        "2. Organizational Profile and Reach",
+        "3 Service Offering and Delivery",
+        "4 Target Market and Specialization",
+        "Understanding your target market helps us identify any underserved segments and opportunities for expanding BDS reach.",
+        "5 Business Model and Sustainability",
+        "This section assesses your organization's financial health and sustainability, helping us identify areas where BDS providers might need support.",
+        "Understanding how you measure impact and the challenges you face helps us develop better support systems and identify areas for improvement in the BDS ecosystem.",
+        "7 Ecosystem Collaboration and Support",
+        "This section explores how BDS providers interact within the larger ecosystem and what support would be most beneficial.",
+        "8. Future Outlook",
+        "Understanding your future plans and perspectives helps us anticipate trends and prepare for the evolving needs of the BDS sector.",
+        "Thank You for Your Participation",
+        "Thank you for dedicating your time and effort to complete this diagnostic tool. Your valuable insights are crucial in our mission to map the landscape of BDS provision in Rwanda, identify opportunities for improvement, and drive growth in the sector. By sharing your experiences and perspectives, you've contributed to a comprehensive understanding of the challenges and opportunities facing BDS providers and MSMEs in Rwanda, which will inform targeted interventions and enhance collaboration within the ecosystem.",
+        "Your participation is a significant step towards creating a more robust, responsive, and effective BDS ecosystem that can drive sustainable MSME growth and contribute to Rwanda's economic development. We look forward to sharing the outcomes of this study and exploring potential opportunities for collaboration in the future. Together, we're shaping a stronger BDS sector that will support Rwanda's vision of becoming a knowledge-based, middle-income economy. Thank you again for your commitment to excellence in business development services.",
+        "MSME Survey Tool: Understanding BDS Provision in Rwanda",
+        "Section 1: Contact Information",
+        "Section 2: Business Challenges and BDS Engagement",
+        "Section 3: BDS Quality and Needs Assessment",
+        "Section 4: Future Engagement",
+        "Conclusion",
+        "Your organisation's current learning initiatives",
+        "Please describe in very practical behaviours what your people need to do differently to achieve your strategic goals. In other words, what would you notice that they would be doing differently if the learning was entirely successful?",
+        "RATE: Pinpoint your organisation's key Winning Behaviours",
+        "FREQUENCY: Tell us about how often the Winning Behaviours are displayed in your organisation",
+        "As a last step, we ask that you rank order the short list of those you have indicated are both important and less frequent. In that way, you will tell us the priority behaviours you would like us to encourage your people to demonstrate. You can either drag and drop the Winning behaviours into your chosen rank position, or you can adjust their numbering manually.",
+        "Prioritise the Winning Behaviours to focus on",
+        "First, we need to know a bit about your role",
+        "RATE: Pinpoint key Winning Behaviours for managers",
+        "FREQUENCY: Tell us how often the Winning Behaviours are displayed by managers",
+        "RANK: Prioritise the Winning Behaviours to focus on for managers",
+        "RATE: Pinpoint key Winning Behaviours for non-managers",
+        "FREQUENCY: Tell us how often the Winning Behaviours are displayed by non-managers",
+        "RANK: Prioritise the Winning Behaviours to focus on for non-managers",
+        "Ecosystem Support Organizations Interview Guide",
+        "Introduction (5 minutes)",
+        "Introduce yourself and the purpose of the interview",
+        "Assure confidentiality and ask for permission to record the interview",
+        "Explain that the interview will take about 1 hour"
+    ]
+
+    # Combine TF-IDF and semantic UIDs
     df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
     df_target["configured_final_UID"] = df_target["Final_UID"]
     df_target["Final_Question"] = df_target["Matched_Question"]
@@ -352,7 +416,20 @@ def finalize_matches(df_target, df_reference):
     df_target["Change_UID"] = df_target["Final_UID"].apply(
         lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
     )
-    
+
+    # Override Final_UID for questions in questions_to_exclude
+    df_target["Final_UID"] = df_target.apply(
+        lambda row: "9999" if row["heading_0"] in questions_to_exclude else row["Final_UID"],
+        axis=1
+    )
+    df_target["configured_final_UID"] = df_target["Final_UID"]
+    df_target["Change_UID"] = df_target["Final_UID"].apply(
+        lambda x: f"9999 - Excluded Question" if x == "9999" else (
+            f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
+        )
+    )
+
+    # Assign parent question UID for choices
     df_target["Final_UID"] = df_target.apply(
         lambda row: df_target[df_target["heading_0"] == row["parent_question"]]["Final_UID"].iloc[0]
         if row["is_choice"] and pd.notnull(row["parent_question"]) else row["Final_UID"],
@@ -360,15 +437,18 @@ def finalize_matches(df_target, df_reference):
     )
     df_target["configured_final_UID"] = df_target["Final_UID"]
     df_target["Change_UID"] = df_target["Final_UID"].apply(
-        lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
+        lambda x: f"9999 - Excluded Question" if x == "9999" else (
+            f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
+        )
     )
-    
+
+    # Add survey_id_title if columns exist
     if "survey_id" in df_target.columns and "survey_title" in df_target.columns:
         df_target["survey_id_title"] = df_target.apply(
             lambda x: f"{x['survey_id']} - {x['survey_title']}" if pd.notnull(x['survey_id']) and pd.notnull(x['survey_title']) else "",
             axis=1
         )
-    
+
     return df_target
 
 def detect_uid_conflicts(df_target):
@@ -672,7 +752,7 @@ if option == "SurveyMonkey":
                     current_change_uid = st.session_state.df_final.at[idx, "Change_UID"] if "Change_UID" in st.session_state.df_final.columns else None
                     if pd.notnull(row["Change_UID"]) and row["Change_UID"] != current_change_uid:
                         new_uid = row["Change_UID"].split(" - ")[0] if row["Change_UID"] and " - " in row["Change_UID"] else None
-                        st.session_state.df_final.at[idx, "Final_UID"] = new_uid
+                        st.session_state.df. Final_UID"] = new_uid
                         st.session_state.df_final.at[idx, "configured_final_UID"] = new_uid
                         st.session_state.df_final.at[idx, "Change_UID"] = row["Change_UID"]
                         st.session_state.uid_changes[idx] = new_uid
