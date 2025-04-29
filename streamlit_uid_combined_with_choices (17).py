@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
+from fuzzywuzzy import fuzz
 
 # Setup
 st.set_page_config(page_title="UID Matcher Combined", layout="wide")
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 TFIDF_HIGH_CONFIDENCE = 0.60
 TFIDF_LOW_CONFIDENCE = 0.50
 SEMANTIC_THRESHOLD = 0.60
+FUZZY_THRESHOLD = 0.95  # For near-exact matches in questions_to_exclude
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000
 
@@ -344,6 +346,24 @@ def assign_match_type(row):
         return row["Match_Confidence"]
     return "🧠 Semantic" if pd.notnull(row["Semantic_UID"]) else "❌ No match"
 
+def is_excluded_question(question, questions_to_exclude, model):
+    # Exact match check
+    if question in questions_to_exclude:
+        return True
+    
+    # Fuzzy match using SentenceTransformer
+    question_emb = model.encode([question], convert_to_tensor=True)
+    exclude_emb = model.encode(questions_to_exclude, convert_to_tensor=True)
+    cosine_scores = util.cos_sim(question_emb, exclude_emb)[0]
+    max_score = cosine_scores.max().item()
+    
+    # Additional fuzzy match using fuzzywuzzy for string similarity
+    fuzzy_scores = [fuzz.ratio(question.lower(), excl.lower()) / 100.0 for excl in questions_to_exclude]
+    max_fuzzy_score = max(fuzzy_scores) if fuzzy_scores else 0.0
+    
+    # Consider it a match if either semantic or fuzzy score is above threshold
+    return max_score >= FUZZY_THRESHOLD or max_fuzzy_score >= FUZZY_THRESHOLD
+
 def finalize_matches(df_target, df_reference):
     # List of questions to assign UID 9999
     questions_to_exclude = [
@@ -408,6 +428,9 @@ def finalize_matches(df_target, df_reference):
         "Explain that the interview will take about 1 hour"
     ]
 
+    # Load SentenceTransformer for fuzzy matching
+    model = load_sentence_transformer()
+
     # Combine TF-IDF and semantic UIDs
     df_target["Final_UID"] = df_target["Suggested_UID"].combine_first(df_target["Semantic_UID"])
     df_target["configured_final_UID"] = df_target["Final_UID"]
@@ -417,9 +440,9 @@ def finalize_matches(df_target, df_reference):
         lambda x: f"{x} - {df_reference[df_reference['uid'] == x]['heading_0'].iloc[0]}" if pd.notnull(x) and x in df_reference["uid"].values else None
     )
 
-    # Override Final_UID for questions in questions_to_exclude
+    # Override Final_UID for questions in questions_to_exclude (exact or fuzzy match)
     df_target["Final_UID"] = df_target.apply(
-        lambda row: "9999" if row["heading_0"] in questions_to_exclude else row["Final_UID"],
+        lambda row: "9999" if is_excluded_question(row["heading_0"], questions_to_exclude, model) else row["Final_UID"],
         axis=1
     )
     df_target["configured_final_UID"] = df_target["Final_UID"]
