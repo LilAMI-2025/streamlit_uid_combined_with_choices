@@ -9,7 +9,15 @@ from sqlalchemy import create_engine, text
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, util
-from fuzzywuzzy import fuzz
+
+# Install fuzzywuzzy if missing
+try:
+    from fuzzywuzzy import fuzz
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "fuzzywuzzy[speedup]"])
+    from fuzzywuzzy import fuzz
 
 # Setup
 st.set_page_config(page_title="UID Matcher Combined", layout="wide")
