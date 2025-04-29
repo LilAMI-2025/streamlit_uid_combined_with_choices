@@ -1,31 +1,37 @@
+### --- Improved Streamlit UID Matching Script --- ###
 
-import streamlit as st
-import pandas as pd
-import requests
-import re
-import logging
-import json
-from uuid import uuid4
-from sqlalchemy import create_engine, text
-from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
-from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer, util
-from fuzzywuzzy import fuzz
+# --- Install and Import Required Libraries ---
+try:
+    import streamlit as st
+    import pandas as pd
+    import requests
+    import re
+    import logging
+    import json
+    from uuid import uuid4
+    from sqlalchemy import create_engine, text
+    from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sentence_transformers import SentenceTransformer, util
+    from rapidfuzz import fuzz
+except ImportError as e:
+    missing_package = str(e).split("No module named ")[-1].replace("'", "")
+    raise ImportError(f"\n\nMissing required package: {missing_package}\nPlease install all required libraries first by running:\npip install pandas openpyxl rapidfuzz python-Levenshtein SQLAlchemy scikit-learn sentence-transformers streamlit requests\n")
 
-# Setup
+# --- Streamlit Page Setup and Logger ---
 st.set_page_config(page_title="UID Matcher Combined", layout="wide")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
+# --- Constants ---
 TFIDF_HIGH_CONFIDENCE = 0.60
 TFIDF_LOW_CONFIDENCE = 0.50
 SEMANTIC_THRESHOLD = 0.60
-FUZZY_THRESHOLD = 0.95  # For near-exact matches in questions_to_exclude
+FUZZY_THRESHOLD = 0.95
 MODEL_NAME = "all-MiniLM-L6-v2"
 BATCH_SIZE = 1000
 
-# Synonym Mapping
+# --- Synonym Mapping ---
 DEFAULT_SYNONYM_MAP = {
     "please select": "what is",
     "sector you are from": "your sector",
@@ -34,16 +40,29 @@ DEFAULT_SYNONYM_MAP = {
     "are you": "do you",
 }
 
-# Cached Resources
+# --- Cache SentenceTransformer Model ---
 @st.cache_resource
 def load_sentence_transformer():
     logger.info(f"Loading SentenceTransformer model: {MODEL_NAME}")
-    try:
-        return SentenceTransformer(MODEL_NAME)
-    except Exception as e:
-        logger.error(f"Failed to load SentenceTransformer: {e}")
-        raise
+    return SentenceTransformer(MODEL_NAME)
 
+# --- Normalize Question Text ---
+def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
+    text = str(text).lower()
+    text = re.sub(r'\(.*?\)', '', text)
+    text = re.sub(r'[^a-z0-9 ]', '', text)
+    for phrase, replacement in synonym_map.items():
+        text = text.replace(phrase, replacement)
+    return ' '.join(w for w in text.split() if w not in ENGLISH_STOP_WORDS)
+
+# --- TF-IDF Vectorizer Cache ---
+@st.cache_data
+def get_tfidf_vectors(df_reference):
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+    vectors = vectorizer.fit_transform(df_reference["norm_text"])
+    return vectorizer, vectors
+
+# --- Snowflake Connection ---
 @st.cache_resource
 def get_snowflake_engine():
     try:
@@ -60,53 +79,11 @@ def get_snowflake_engine():
         logger.error(f"Snowflake engine creation failed: {e}")
         if "250001" in str(e):
             st.warning(
-                "Snowflake connection failed: User account is locked. "
-                "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                "Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
+                "Snowflake connection failed: User account is locked. Visit: https://community.snowflake.com/s/error-your-user-login-has-been-locked"
             )
         raise
 
-@st.cache_data
-def get_tfidf_vectors(df_reference):
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2))
-    vectors = vectorizer.fit_transform(df_reference["norm_text"])
-    return vectorizer, vectors
-
-# Normalization
-def enhanced_normalize(text, synonym_map=DEFAULT_SYNONYM_MAP):
-    text = str(text).lower()
-    text = re.sub(r'\(.*?\)', '', text)
-    text = re.sub(r'[^a-z0-9 ]', '', text)
-    for phrase, replacement in synonym_map.items():
-        text = text.replace(phrase, replacement)
-    return ' '.join(w for w in text.split() if w not in ENGLISH_STOP_WORDS)
-
-# Calculate Matched Questions Percentage
-def calculate_matched_percentage(df_final):
-    if df_final is None or df_final.empty:
-        logger.info("calculate_matched_percentage: df_final is None or empty")
-        return 0.0
-    
-    df_main = df_final[df_final["is_choice"] == False].copy()
-    logger.info(f"calculate_matched_percentage: Total main questions: {len(df_main)}")
-    
-    privacy_filter = ~df_main["heading_0"].str.contains("Our Privacy Policy", case=False, na=False)
-    html_pattern = r"<div.*text-align:\s*center.*<span.*font-size:\s*12pt.*<em>If you have any questions, please contact your AMI Learner Success Manager.*</em>.*</span>.*</div>"
-    html_filter = ~df_main["heading_0"].str.contains(html_pattern, case=False, na=False, regex=True)
-    
-    eligible_questions = df_main[privacy_filter & html_filter]
-    logger.info(f"calculate_matched_percentage: Eligible questions after exclusions: {len(eligible_questions)}")
-    
-    if eligible_questions.empty:
-        logger.info("calculate_matched_percentage: No eligible questions after exclusions")
-        return 0.0
-    
-    matched_questions = eligible_questions[eligible_questions["Final_UID"].notna()]
-    logger.info(f"calculate_matched_percentage: Matched questions: {len(matched_questions)}")
-    percentage = (len(matched_questions) / len(eligible_questions)) * 100
-    return round(percentage, 2)
-
-# Snowflake Queries
+# --- Snowflake Queries ---
 def run_snowflake_reference_query(limit=10000, offset=0):
     query = """
         SELECT HEADING_0, MAX(UID) AS UID
@@ -115,24 +92,8 @@ def run_snowflake_reference_query(limit=10000, offset=0):
         GROUP BY HEADING_0
         LIMIT :limit OFFSET :offset
     """
-    try:
-        with get_snowflake_engine().connect() as conn:
-            result = pd.read_sql(text(query), conn, params={"limit": limit, "offset": offset})
-        return result
-    except Exception as e:
-        logger.error(f"Snowflake reference query failed: {e}")
-        if "250001" in str(e):
-            st.warning(
-                "Cannot fetch Snowflake data: User account is locked. "
-                "UID matching is disabled. Please resolve the lockout and retry."
-            )
-        elif "invalid identifier" in str(e).lower():
-            st.warning(
-                "Snowflake query failed due to invalid column. "
-                "UID matching is disabled, but you can edit questions, search, and use Google Forms. "
-                "Contact your Snowflake admin to verify table schema."
-            )
-        raise
+    with get_snowflake_engine().connect() as conn:
+        return pd.read_sql(text(query), conn, params={"limit": limit, "offset": offset})
 
 def run_snowflake_target_query():
     query = """
@@ -140,157 +101,11 @@ def run_snowflake_target_query():
         FROM AMI_DBT.DBT_SURVEY_MONKEY.SURVEY_DETAILS_RESPONSES_COMBINED_LIVE
         WHERE UID IS NULL AND NOT LOWER(HEADING_0) LIKE 'our privacy policy%'
     """
-    try:
-        with get_snowflake_engine().connect() as conn:
-            result = pd.read_sql(text(query), conn)
-        return result
-    except Exception as e:
-        logger.error(f"Snowflake target query failed: {e}")
-        if "250001" in str(e):
-            st.warning(
-                "Cannot fetch Snowflake data: User account is locked. "
-                "Please resolve the lockout and retry."
-            )
-        raise
+    with get_snowflake_engine().connect() as conn:
+        return pd.read_sql(text(query), conn)
 
-# SurveyMonkey API
-def get_surveys(token):
-    url = "https://api.surveymonkey.com/v3/surveys"
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json().get("data", [])
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch surveys: {e}")
-        raise
-
-def get_survey_details(survey_id, token):
-    url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/details"
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch survey details for ID {survey_id}: {e}")
-        raise
-
-def create_survey(token, survey_template):
-    url = "https://api.surveymonkey.com/v3/surveys"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    try:
-        response = requests.post(url, headers=headers, json={
-            "title": survey_template["title"],
-            "nickname": survey_template.get("nickname", survey_template["title"]),
-            "language": survey_template.get("language", "en")
-        })
-        response.raise_for_status()
-        survey_id = response.json().get("id")
-        return survey_id
-    except requests.RequestException as e:
-        logger.error(f"Failed to create survey: {e}")
-        raise
-
-def create_page(token, survey_id, page_template):
-    url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/pages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    try:
-        response = requests.post(url, headers=headers, json={
-            "title": page_template.get("title", ""),
-            "description": page_template.get("description", "")
-        })
-        response.raise_for_status()
-        page_id = response.json().get("id")
-        return page_id
-    except requests.RequestException as e:
-        logger.error(f"Failed to create page for survey {survey_id}: {e}")
-        raise
-
-def create_question(token, survey_id, page_id, question_template):
-    url = f"https://api.surveymonkey.com/v3/surveys/{survey_id}/pages/{page_id}/questions"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    try:
-        payload = {
-            "family": question_template["family"],
-            "subtype": question_template["subtype"],
-            "headings": [{"heading": question_template["heading"]}],
-            "position": question_template["position"],
-            "required": question_template.get("is_required", False)
-        }
-        if "choices" in question_template:
-            payload["answers"] = {"choices": question_template["choices"]}
-        if question_template["family"] == "matrix":
-            payload["answers"] = {
-                "rows": question_template.get("rows", []),
-                "choices": question_template.get("choices", [])
-            }
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json().get("id")
-    except Exception as e:
-        logger.error(f"Failed to create question for page {page_id}: {e}")
-        raise
-
-def extract_questions(survey_json):
-    questions = []
-    global_position = 0
-    for page in survey_json.get("pages", []):
-        for question in page.get("questions", []):
-            q_text = question.get("headings", [{}])[0].get("heading", "")
-            q_id = question.get("id", None)
-            family = question.get("family", None)
-            subtype = question.get("subtype", None)
-            if family == "single_choice":
-                schema_type = "Single Choice"
-            elif family == "multiple_choice":
-                schema_type = "Multiple Choice"
-            elif family == "open_ended":
-                schema_type = "Open-Ended"
-            elif family == "matrix":
-                schema_type = "Matrix"
-            else:
-                choices = question.get("answers", {}).get("choices", [])
-                schema_type = "Multiple Choice" if choices else "Open-Ended"
-                if choices and ("select one" in q_text.lower() or len(choices) <= 2):
-                    schema_type = "Single Choice"
-            
-            if q_text:
-                global_position += 1
-                questions.append({
-                    "heading_0": q_text,
-                    "position": global_position,
-                    "is_choice": False,
-                    "parent_question": None,
-                    "question_uid": q_id,
-                    "schema_type": schema_type,
-                    "mandatory": False,
-                    "mandatory_editable": True,
-                    "survey_id": survey_json.get("id", ""),
-                    "survey_title": survey_json.get("title", "")
-                })
-                choices = question.get("answers", {}).get("choices", [])
-                for choice in choices:
-                    choice_text = choice.get("text", "")
-                    if choice_text:
-                        questions.append({
-                            "heading_0": f"{q_text} - {choice_text}",
-                            "position": global_position,
-                            "is_choice": True,
-                            "parent_question": q_text,
-                            "question_uid": q_id,
-                            "schema_type": schema_type,
-                            "mandatory": False,
-                            "mandatory_editable": False,
-                            "survey_id": survey_json.get("id", ""),
-                            "survey_title": survey_json.get("title", "")
-                        })
-    return questions
-
-# UID Matching
+# --- UID Matching Functions (TF-IDF, Semantic, Fuzzy) ---
 def compute_tfidf_matches(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP):
-    df_reference = df_reference[df_reference["heading_0"].notna()].reset_index(drop=True)
-    df_target = df_target[df_target["heading_0"].notna()].reset_index(drop=True)
     df_reference["norm_text"] = df_reference["heading_0"].apply(enhanced_normalize)
     df_target["norm_text"] = df_target["heading_0"].apply(enhanced_normalize)
 
@@ -309,7 +124,7 @@ def compute_tfidf_matches(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_M
         else:
             conf = "❌ No match"
             best_idx = None
-        matched_uids.append(df_reference.iloc[best_idx]["uid"] if best_idx is not None else None)
+        matched_uids.append(df_reference.iloc[best_idx]["UID"] if best_idx is not None else None)
         matched_qs.append(df_reference.iloc[best_idx]["heading_0"] if best_idx is not None else None)
         scores.append(round(best_score, 4))
         confs.append(conf)
