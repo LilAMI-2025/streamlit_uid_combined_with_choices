@@ -1282,9 +1282,14 @@ if option == "SurveyMonkey":
                                             create_question(token, survey_id, page_id, question_template)
                                     st.success(f"Survey created successfully! Survey ID: {survey_id}")
                             except Exception as e:
-                                st.error(f"Failed to create survey: {e}")
-                    
-                    if st.session_state.survey_template:
+    logger.error(f"Snowflake upload failed: {e}")
+    if "250001" in str(e):
+        st.error(
+            "Snowflake upload failed: User account is locked. Contact your Snowflake admin."
+        )
+    else:
+        st.error(f"Snowflake upload failed: {e}")
+                     if st.session_state.survey_template:
                         st.subheader("Preview Survey Template")
                         st.json(st.session_state.survey_template)
 
