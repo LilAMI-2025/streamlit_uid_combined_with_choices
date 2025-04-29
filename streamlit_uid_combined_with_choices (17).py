@@ -752,7 +752,7 @@ if option == "SurveyMonkey":
                     current_change_uid = st.session_state.df_final.at[idx, "Change_UID"] if "Change_UID" in st.session_state.df_final.columns else None
                     if pd.notnull(row["Change_UID"]) and row["Change_UID"] != current_change_uid:
                         new_uid = row["Change_UID"].split(" - ")[0] if row["Change_UID"] and " - " in row["Change_UID"] else None
-                        st.session_state.df. Final_UID"] = new_uid
+                        st.session_state.df_final.at[idx, "Final_UID"] = new_uid
                         st.session_state.df_final.at[idx, "configured_final_UID"] = new_uid
                         st.session_state.df_final.at[idx, "Change_UID"] = row["Change_UID"]
                         st.session_state.uid_changes[idx] = new_uid
