@@ -1,9 +1,11 @@
-streamlit
 pandas
-requests
-sqlalchemy
+openpyxl
+rapidfuzz
+python-Levenshtein
+SQLAlchemy
 scikit-learn
 sentence-transformers
-snowflake-connector-python
-snowflake-sqlalchemy
+streamlit
+requests
+
 
