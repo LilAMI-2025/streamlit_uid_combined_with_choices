@@ -511,7 +511,7 @@ def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batc
 st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 
 # Secrets Validation
-if "snowflake" not in st.secrets or "surveymonkey" not in st.secrets:
+if "snowflake" not in st.secrets or "surveymonkey" not in=st.secrets:
     st.error("Missing secrets configuration for Snowflake or SurveyMonkey.")
     st.stop()
 
@@ -967,7 +967,7 @@ if option == "SurveyMonkey":
                         
                         st.write("#### Add Question from Existing")
                         question_search = st.text_input("Search Questions", key="question_search")
-                        filtered_questions = [q for q in st.session_state.dedup_questions if not question_search or question_search.lower() in q.lower()]
+                        filtered_questions = [q for q in st.session_state.dedup_questions if not search_query or question_search.lower() in q.lower()]
                         new_question = st.selectbox(
                             "Select Question",
                             [""] + filtered_questions,
@@ -1311,8 +1311,3 @@ if option == "Snowflake":
             logger.error(f"Snowflake processing failed: {e}")
             if "250001" in str(e):
                 st.error(
-                    "Snowflake connection failed: User account is locked. "
-                    "Contact your Snowflake admin or wait 15–30 minutes."
-                )
-            else:
-                st.error(f"Error: {e}")
