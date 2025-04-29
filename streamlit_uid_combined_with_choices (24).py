@@ -511,7 +511,7 @@ def run_uid_match(df_reference, df_target, synonym_map=DEFAULT_SYNONYM_MAP, batc
 st.title("🧠 UID Matcher: Snowflake + SurveyMonkey")
 
 # Secrets Validation
-if "snowflake" not in st.secrets or "surveymonkey" not in=st.secrets:
+if "snowflake" not in st.secrets or "surveymonkey" not in st.secrets:
     st.error("Missing secrets configuration for Snowflake or SurveyMonkey.")
     st.stop()
 
