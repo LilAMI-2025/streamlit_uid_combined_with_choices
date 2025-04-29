@@ -897,11 +897,13 @@ if option == "SurveyMonkey":
                                 )
                         st.success("Successfully uploaded to Snowflake!")
                     except Exception as e:
-                        logger.error(f"Snowflake upload failed: {e}")
-                        if "250001" in str(e):
-                            st.error("Snowflake upload failed: User account is locked. Contact your Snowflake admin.")
-                        else:
-                            st.error(f"Snowflake upload failed: {e}")
+    logger.error(f"Snowflake upload failed: {e}")
+    if "250001" in str(e):
+        st.error(
+            "Snowflake upload failed: User account is locked. Contact your Snowflake admin."
+        )
+    else:
+        st.error(f"Snowflake upload failed: {e}")
             else:
                 st.write("Select a survey to view the configured survey.")
 
